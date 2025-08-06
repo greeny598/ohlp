@@ -1,9 +1,9 @@
 [project]
-name = "ohlp-2"
+name = "ohlp-5"
 version = "0.1.0"
 description = ""
 authors = [
-    {name = "Your Name",email = "you@example.com"}
+    {name = "Konstantin Gnidko",email = "greeny598@gmail.com"}
 ]
 readme = "README.md"
 requires-python = ">=3.12,<4.0"
@@ -17,6 +17,12 @@ dependencies = [
     "python-docx (>=1.1.2,<2.0.0)",
     "spyder-kernels (==3.0.*)",
     "docling (>=2.34.0,<3.0.0)",
+    "tiktoken (>=0.9.0,<0.10.0)",
+    "asyncio (>=3.4.3,<4.0.0)",
+    "rapidfuzz (>=3.13.0,<4.0.0)",
+    "langchain-community (>=0.3.26,<0.4.0)",
+    "grpcio (>=1.73.1,<2.0.0)",
+    "yandexcloud (>=0.350.0,<0.351.0)",
 ]
 
 [tool.poetry]

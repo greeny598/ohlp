@@ -1,95 +1,164 @@
+# main.py
+import glob
 import os
-from datetime import datetime
+import argparse
+import logging
+
+# --- Настройка логирования ---
+logging.basicConfig(
+    level=logging.DEBUG,  # Или DEBUG для более подробного логирования
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("app.log", encoding='utf-8')  # Вывод в файл
+    ]
+)
+
 import gradio as gr
-from utils.document_loader import extract_text_from_document
-from langchain_utils.section_checker import SectionChecker
-from utils.docx_writer import fill_template
 
-# Заглушка для рекомендаций (пока не используется в отчете)
-def stub_recommendations(rec_fill_file):
-    return rec_fill_file.name if rec_fill_file else None
+# Импорт новой функции генерации отчета
+# Предполагается, что в utils/__init__.py есть: from .report_generator import generate_report
+# или можно импортировать напрямую:
+from utils.report_generator import generate_report
 
-# Основная функция генерации отчета с Gradio-интерфейсом
-def generate_report(test_file, ref_file, rec_fill_file, progress=gr.Progress()):
-    # Инициализация
-    progress(0.05, desc="Инициализация...")
 
-    # Шаг 1: извлечение текста из PDF
-    progress(0.2, desc="Извлечение текста из PDF...")
-    test_text = extract_text_from_document(test_file.name)
-    ref_text = extract_text_from_document(ref_file.name)
-    # rec_stub = stub_recommendations(rec_fill_file)
+logger = logging.getLogger(__name__)  # Логгер для main.py
 
-    # Шаг 2: сравнение инструкций через LLM
-    progress(0.5, desc="Сравнение инструкций через LLM...")
-    checker = SectionChecker(api_provider='deepseek')
-    diffs = checker.check_sections(ref_text, test_text)
+# --- Настройка аргументов командной строки ---
+parser = argparse.ArgumentParser(
+    description="Генерация отчета с возможностью выбора провайдера API и параметров сервера Gradio."
+)
+parser.add_argument(
+    "--provider", "-p",
+    default="yandex",
+    help="Имя провайдера для SectionChecker (по умолчанию 'yandex')"
+)
+parser.add_argument(
+    "--host", "-H",
+    default="127.0.0.1",
+    help="Адрес сервера Gradio"
+)
+parser.add_argument(
+    "--port", "-P",
+    type=int,
+    default=7860,
+    help="Порт сервера Gradio"
+)
+parser.add_argument(
+    "--share", "-s",
+    action="store_true",
+    help="Включить публичный шаринг Gradio"
+)
+args = parser.parse_args()
 
-    # Шаг 3: очистка JSON и подготовка списка различий
-    progress(0.7, desc="Очистка и форматирование данных...")
-    clean = checker.clean_json_from_md(diffs)
+# --- Константы по умолчанию ---
+TEMPLATE_DIR = os.getenv("TEMPLATE_DIR", "templates")
+OUTPUT_DIR = os.getenv("OUTPUT_DIR", "results")
+REPORT_PREFIX = os.getenv("REPORT_PREFIX", "report")
+PROVIDER = args.provider
 
-    # Шаг 4: формирование и сохранение DOCX-отчета
-    progress(0.85, desc="Формирование отчета DOCX...")
-    base_name = os.path.splitext(os.path.basename(test_file.name))[0]
-    info = {
-        'DRUG_NAME': base_name,
-        'DIFFERENCES': clean,
-        'DATE': datetime.now().strftime('%d.%m.%Y г.')
-    }
+# --- Получение списка шаблонов ---
+def get_available_templates():
+    """Получает список доступных шаблонов из папки TEMPLATE_DIR."""
+    try:
+        templates = [os.path.basename(p) for p in glob.glob(os.path.join(TEMPLATE_DIR, "*.docx"))]
+        logger.debug(f"Найденные шаблоны: {templates}")
+        return templates
+    except Exception as e:
+        logger.error(f"Ошибка при поиске шаблонов в '{TEMPLATE_DIR}': {e}")
+        return []
 
-    out_dir = 'results'
-    os.makedirs(out_dir, exist_ok=True)
-    timestamp = int(datetime.now().timestamp())
-    output_path = os.path.join(out_dir, f'report_{base_name}_{timestamp}.docx')
+templates = get_available_templates()
 
-    # Используем шаблон для различий
-    fill_template(
-        template_path='templates/differences_template.docx',
-        output_path=output_path,
-        info=info
-    )
-
-    progress(1.0, desc="Отчет готов!")
-    return output_path
-
-# CSS стили для интерфейса
+# --- Настройка Gradio интерфейса ---
 custom_css = """
-label {font-size: 12px !important;}
-.container {max-width: 600px !important;}
-.gradio-container {padding: 10px !important;}
-input, button {margin: 5px 0 !important;}
+.compact-file {
+  display: inline-block !important;
+  width: 30% !important;
+  margin-right: 1% !important;
+  vertical-align: top;
+}
+.compact-file .file-upload {
+  min-height: 0.25rem !important;
+  height: 0.5rem !important;
+  padding: 0.25rem !important;
+}
+.compact-file .file-upload .file-input {
+  height: 0.5rem !important;
+  line-height: 0.5rem !important;
+}
+.compact-file .file-upload .file-input button {
+  height: 0.5rem !important;
+  line-height: 0.5rem !important;
+}
 """
 
 with gr.Blocks(css=custom_css) as iface:
-    gr.Markdown("## Сравнение инструкций")
-    gr.Markdown("Загрузите PDF-файлы:")
-
+    gr.Markdown("## 📄 Сравнение инструкций и формирование отчета")
     with gr.Row():
-        with gr.Column():
-            test_input = gr.UploadButton("Загрузка проверяемой инструкции", file_types=[".pdf"])
-            test_label = gr.Text(label="Загруженный документ:", value="", interactive=False)
-        with gr.Column():
-            ref_input = gr.UploadButton("Загрузка эталона", file_types=[".pdf"])
-            ref_label = gr.Text(label="Загруженный документ:", value="", interactive=False)
-        with gr.Column():
-            rec_input = gr.UploadButton("Загрузка рекомендаций по заполнению", file_types=[".pdf"])
-            rec_label = gr.Text(label="Загруженный документ:", value="", interactive=False)
+        test_input = gr.File(
+            label="📥 Проверяемая инструкция",
+            file_types=[".pdf", ".docx"],
+            type="filepath",
+            elem_classes="compact-file"
+        )
+        ref_input = gr.File(
+            label="📘 Эталонная инструкция",
+            file_types=[".pdf", ".docx"],
+            type="filepath",
+            elem_classes="compact-file"
+        )
+        rec_input = gr.File(
+            label="📑 Рекомендации по заполнению",
+            file_types=[".pdf", ".docx"],
+            type="filepath",
+            elem_classes="compact-file"
+        )
 
-    # Обработчики загрузки
-    test_input.upload(lambda f: f.name or "", inputs=[test_input], outputs=[test_label])
-    ref_input.upload(lambda f: f.name or "", inputs=[ref_input], outputs=[ref_label])
-    rec_input.upload(lambda f: f.name or "", inputs=[rec_input], outputs=[rec_label])
-
-    # Кнопка запуска сравнения
-    compare_btn = gr.Button("Сравнить", size="sm")
-    output_file = gr.File(label="Отчет (DOCX)", file_types=[".docx"])
-
-    compare_btn.click(
-        fn=generate_report,
-        inputs=[test_input, ref_input, rec_input],
-        outputs=output_file
+    tmpl_input = gr.Dropdown(
+        label="📑 Шаблон отчёта",
+        choices=templates,
+        value=templates[0] if templates else None,
+        interactive=True
     )
 
-if __name__ == '__main__':
-    iface.launch()
+    output_file = gr.File(
+        label="📤 DOCX-отчет"
+    )
+
+    compare_btn = gr.Button("🔍 Сравнить и сформировать отчет")
+    compare_btn.click(
+        fn=lambda t, r, c, tmpl: generate_report(
+            t, r, c, tmpl,
+            template_dir=TEMPLATE_DIR,
+            output_dir=OUTPUT_DIR,
+            provider=PROVIDER,
+            prefix=REPORT_PREFIX
+        ),
+        inputs=[test_input, ref_input, rec_input, tmpl_input],
+        outputs=output_file,
+        show_progress=True
+    )
+
+    iface.queue()
+
+# --- Точка входа ---
+if __name__ == "__main__":
+    logger.info("Запуск Gradio-интерфейса...")
+    logger.info(f"Используемый провайдер LLM: {PROVIDER}")
+    logger.info(f"Папка с шаблонами: {TEMPLATE_DIR}")
+    logger.info(f"Папка для отчетов: {OUTPUT_DIR}")
+    logger.info(f"Префикс отчетов: {REPORT_PREFIX}")
+    logger.info(f"Доступные шаблоны: {templates}")
+
+    try:
+        iface.launch(
+            server_name=args.host,
+            server_port=args.port,
+            share=args.share
+        )
+        logger.info("Gradio-интерфейс запущен.")
+    except KeyboardInterrupt:
+        logger.info("Получен сигнал завершения (Ctrl+C), остановка сервера.")
+    except Exception as e:
+        logger.critical(f"Критическая ошибка при запуске Gradio-интерфейса: {e}", exc_info=True)
+        raise

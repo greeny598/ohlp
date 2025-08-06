@@ -4,7 +4,10 @@ from pydantic import SecretStr
 class Settings(BaseSettings):
     # Желательно вместо str использовать SecretStr 
     # для конфиденциальных данных, например, токена бота
-    LLM_KEY: SecretStr
+    deepseek_KEY: SecretStr
+    yandexgpt_KEY: SecretStr
+    yandex_cloud_folder_id: SecretStr
+    openai_KEY: SecretStr
 
     # Начиная со второй версии pydantic, настройки класса настроек задаются
     # через model_config

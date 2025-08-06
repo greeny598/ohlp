@@ -1,127 +1,224 @@
-from docx import Document
-from docx.shared import Pt
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 import os
+import re
+from datetime import datetime
+from typing import Any, Dict, List, Tuple
+
+from docx import Document
+from docx.oxml import OxmlElement
+from docx.text.paragraph import Paragraph
+from docx.shared import Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import RGBColor
+from difflib import SequenceMatcher
 
 
-def remove_paragraph(paragraph):
+def iter_paragraphs(element) -> List[Paragraph]:
     """
-    Удаляет указанный параграф из документа.
+    Рекурсивно обходит все параграфы в переданном элементе:
+    Document, _Cell (ячейка таблицы) или _Body (тело документа).
     """
-    p = paragraph._element
-    p.getparent().remove(p)
-    paragraph._p = paragraph._element = None
+    for para in element.paragraphs:
+        yield para
+    for table in getattr(element, "tables", []):
+        for row in table.rows:
+            for cell in row.cells:
+                yield from iter_paragraphs(cell)
 
 
-def _set_table_borders(table):
+def insert_recommendations(doc: Document, recommendations: Dict[str, Any]) -> None:
     """
-    Устанавливает тонкую сплошную чёрную границу для всей таблицы.
+    Ищет в doc плейсхолдер {_RECOMMENDATIONS_}, очищает его и вставляет
+    по одной строке для каждой записи recommendations со статусом != 'complied'.
+    Каждая строка — новый абзац с:
+      - отступом первой строки 1 см
+      - выравниванием по ширине
+      - ключ секции (жирным)
+      - комментарий (с маленькой буквы, кавычки-ёлочки)
     """
-    # Получаем XML-элемент таблицы
-    tbl = table._element
-    # Получаем или создаём элемент tblPr
-    tblPr = tbl.tblPr
-    if tblPr is None:
-        tblPr = OxmlElement('w:tblPr')
-        tbl.insert(0, tblPr)
-    # Создаём элемент tblBorders
-    tblBorders = OxmlElement('w:tblBorders')
-    # Задаём границы для всех сторон и внутренних линий
-    for border_name in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
-        border = OxmlElement(f'w:{border_name}')
-        border.set(qn('w:val'), 'single')   # тип линии: сплошная
-        border.set(qn('w:sz'), '4')          # толщина границы (в восьмых пункта)
-        border.set(qn('w:space'), '0')       # отступ от содержимого
-        border.set(qn('w:color'), '000000')  # цвет: чёрный
-        tblBorders.append(border)
-    # Добавляем tblBorders к tblPr
-    tblPr.append(tblBorders)
+    for paragraph in doc.paragraphs:
+        if '{_RECOMMENDATIONS_}' in paragraph.text:
+            paragraph.text = ''
+            prev = paragraph
 
-
-def fill_template(template_path: str, output_path: str, info: dict) -> str:
-    """
-    Заполняет шаблон DOCX значениями из словаря info.
-    Вставляет таблицу изменений с чёрными границами.
-
-    Параметры:
-    - template_path: путь к шаблону DOCX
-    - output_path: путь для сохранения документа
-    - info: словарь с ключами 'DRUG_NAME', 'DATE', 'DIFFERENCES'
-    """
-    if not os.path.isfile(template_path):
-        raise FileNotFoundError(f"Шаблон не найден: {template_path}")
-
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    doc = Document(template_path)
-
-    # Настройка стиля Normal
-    style = doc.styles['Normal']
-    style.font.name = 'Times New Roman'
-    style._element.rPr.rFonts.set(qn('w:eastAsia'), 'Times New Roman')
-    style.font.size = Pt(14)
-
-    # Замена плейсхолдеров DRUG_NAME и DATE
-    for para in doc.paragraphs:
-        if '{DRUG_NAME}' in para.text:
-            para.text = para.text.replace('{DRUG_NAME}', info.get('DRUG_NAME', ''))
-            para.alignment = WD_PARAGRAPH_ALIGNMENT.JUSTIFY
-        if '{DATE}' in para.text:
-            para.text = para.text.replace('{DATE}', info.get('DATE', ''))
-            para.alignment = WD_PARAGRAPH_ALIGNMENT.JUSTIFY
-
-    # Вставка таблицы
-    for para in list(doc.paragraphs):
-        if '{_DIFFERENCES_}' in para.text:
-            diffs = info.get('DIFFERENCES', [])
-            tbl = doc.add_table(rows=1, cols=4)
-            # Устанавливаем видимые границы
-            _set_table_borders(tbl)
-
-            # Заголовки
-            hdr_cells = tbl.rows[0].cells
-            headers = [
-                'Раздел',
-                'Отличия',
-                'Формулировка из эталонного документа',
-                'Формулировка из анализируемого документа'
-            ]
-            for i, title in enumerate(headers):
-                cell = hdr_cells[i]
-                cell.text = title
-                for p in cell.paragraphs:
-                    p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-                    for run in p.runs:
-                        run.font.name = 'Times New Roman'
-                        run._element.rPr.rFonts.set(qn('w:eastAsia'), 'Times New Roman')
-                        run.font.size = Pt(12)
-                        run.bold = True
-
-            # Строки данных
-            for entry in diffs:
-                row_cells = tbl.add_row().cells
-                values = [
-                    entry.get('section', ''),
-                    entry.get('difference', ''),
-                    entry.get('old', ''),
-                    entry.get('actual', '')
-                ]
-                for j, text in enumerate(values):
-                    cell = row_cells[j]
-                    cell.text = text
-                    for p in cell.paragraphs:
-                        p.alignment = WD_PARAGRAPH_ALIGNMENT.JUSTIFY
-                        for run in p.runs:
-                            run.font.name = 'Times New Roman'
-                            run._element.rPr.rFonts.set(qn('w:eastAsia'), 'Times New Roman')
-                            run.font.size = Pt(12)
-
-            # Перенос таблицы на место плейсхолдера
-            tbl_xml = tbl._tbl
-            para._p.addnext(tbl_xml)
-            remove_paragraph(para)
+            for key, data in recommendations.items():
+                print(key)
+                if data.get('compliance') == 'complied':
+                    continue
+                comment = data.get('comments', '').strip()
+                if not comment:
+                    continue
+                # lowercase first char
+                comment = comment[0].lower() + comment[1:]
+                # quotes to «»
+                comment = re.sub(r'"([^\"]*)"', r'«\1»', comment)
+                comment = re.sub(r"'([^']*)'", r'«\1»', comment)
+                # build paragraph
+                p_elm = OxmlElement('w:p')
+                prev._p.addnext(p_elm)
+                p = Paragraph(p_elm, prev._parent)
+                fmt = p.paragraph_format
+                fmt.first_line_indent = Cm(1)
+                fmt.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                # section key bold
+                run_section = p.add_run(f"{key}: ")
+                run_section.bold = True
+                # comment normal
+                p.add_run(comment)
+                prev = p
             break
 
-    doc.save(output_path)
-    return output_path
+
+def highlight_differences(a: str, b: str,
+                          color_a: Tuple[int, int, int] = (0, 128, 0),
+                          color_b: Tuple[int, int, int] = (255, 0, 0)) -> Tuple[List, List]:
+    """
+    Сравнивает строки a и b, возвращает два списка фрагментов:
+    each element is (type, text, (color,))
+    where type is 'plain' or 'highlight'.
+    """
+    matcher = SequenceMatcher(None, a, b)
+    res_a, res_b = [], []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        ta, tb = a[i1:i2], b[j1:j2]
+        if tag == 'equal':
+            res_a.append(('plain', ta))
+            res_b.append(('plain', tb))
+        else:
+            if tag in ('replace', 'delete'):
+                res_a.append(('highlight', ta, color_a))
+            if tag in ('replace', 'insert'):
+                res_b.append(('highlight', tb, color_b))
+    return res_a, res_b
+
+
+def replace_placeholders_in_doc(doc: Document, replacements: dict):
+    """
+    Заменяет все ключи из replacements на их значения в документе,
+    во всех параграфах — включая таблицы любой вложенности.
+    """
+    if not replacements:
+        return
+
+    # один паттерн из всех ключей (экраним спецсимволы)
+    pattern = re.compile("|".join(re.escape(k) for k in replacements.keys()))
+
+    for para in iter_paragraphs(doc):
+        orig = para.text
+        # в один проход меняем сразу все вхождения
+        new = pattern.sub(lambda m: replacements[m.group(0)], orig)
+        if new == orig:
+            continue
+
+        # пробегаемся по run'ам и правим только те, где есть текст
+        for run in para.runs:
+            run_text = run.text
+            replaced = pattern.sub(
+                lambda m: replacements[m.group(0)], run_text)
+            if replaced != run_text:
+                run.text = replaced
+
+        # если placeholder выпадал между runs и не был пойман,
+        # можно на крайний случай очистить и вставить один run:
+        if para.text != new:
+            for run in para.runs:
+                run.text = ""
+            para.add_run(new)
+
+
+def _extract_from_header(doc: Document) -> Tuple[str, str]:
+    import re
+    # 1) найти параграф с «Листок‑вкладыш»
+    paras = [p.text.strip() for p in doc.paragraphs]
+    idx = next(i for i, t in enumerate(paras)
+               if t.startswith("Листок‑вкладыш"))
+    # 2) собрать следующие непустые строки до первого пустого
+    names = []
+    for line in paras[idx+1:]:
+        if not line:
+            break
+        # отберите только строки с указанием mg
+        if re.search(r'\d+\s*мг', line):
+            names.append(line)
+    # 3) из каждой строки взять часть до первого «,»
+    drugs = [ln.split(',', 1)[0].strip() for ln in names]
+    # 4) убрать дубликаты и взять первые две
+    seen = []
+    for d in drugs:
+        if d not in seen:
+            seen.append(d)
+    ref = seen[0] if seen else ''
+    test = seen[1] if len(seen) > 1 else seen[0] if seen else ''
+    return ref, test
+
+
+def extract_drug_names(doc: Document, table_index: int = 2) -> Tuple[str, str]:
+    """
+    Из таблицы под индексом table_index берёт названия препаратов
+    в строке 2 (cells[0] и cells[1]), отсекая всё до \n и очищая.
+    Возвращает (ref_name, test_name).
+    """
+    def clean(name: str) -> str:
+        return re.sub(r'[.,;:!?()\[\]{}«»"\']+$', '', name.strip())
+    table = doc.tables[table_index]
+    # первая строка — заголовок, вторая — названия
+    raw_ref = table.rows[1].cells[0].text.partition('\n')[2]
+    raw_test = table.rows[1].cells[1].text.partition('\n')[2]
+    return clean(raw_ref), clean(raw_test)
+
+
+def build_replacements(ref_name: str, test_name: str) -> Dict[str, str]:
+    """
+    Формирует словарь для replace_placeholders_in_doc:
+      {{'_REF_NAME_': ref_name, '_TEST_NAME_': test_name, '_DATE_': today}}
+    """
+    today = datetime.now().strftime("%d.%m.%Y") + " г."
+    return {
+        "{_REF_NAME_}": ref_name,
+        "{_TEST_NAME_}": test_name,
+        "{_DATE_}": today,
+    }
+
+
+def fill_comparison_table(doc: Document,
+                          data: List[Dict[str, Any]],
+                          table_index: int = 2) -> None:
+    """
+    Заполняет таблицу с индексом table_index данными data:
+    для каждого entry в data создаёт параграфы,
+    сравнивает референт и тест и подсвечивает отличия.
+    """
+    table = doc.tables[table_index]
+    for i, entry in enumerate(data, start=1):
+        row = table.rows[i]
+        ref_para = row.cells[0].add_paragraph()
+        test_para = row.cells[1].add_paragraph()
+        ref_runs, test_runs = highlight_differences(
+            entry['Содержимое референтного документа'],
+            entry['Содержимое тестируемого документа']
+        )
+        for typ, text, *clr in ref_runs:
+            run = ref_para.add_run(text)
+            if typ == 'highlight':
+                run.font.color.rgb = RGBColor(*clr[0])
+        for typ, text, *clr in test_runs:
+            run = test_para.add_run(text)
+            if typ == 'highlight':
+                run.font.color.rgb = RGBColor(*clr[0])
+        # optional third column
+        if 'Отличия' in entry and len(row.cells) > 2:
+            row.cells[2].text = entry['Отличия']
+
+
+def save_with_timestamp(doc: Document,
+                        output_dir: str = "results",
+                        prefix: str = "report") -> str:
+    """
+    Сохраняет doc в папке output_dir с названием
+    prefix_DD_MM_YY(HH_MM_SS).docx, возвращает путь.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    ts = datetime.now().strftime("%d_%m_%y_%H_%M_%S")
+    filename = f"{prefix}_{ts}.docx"
+    path = os.path.join(output_dir, filename)
+    doc.save(path)
+    return path
