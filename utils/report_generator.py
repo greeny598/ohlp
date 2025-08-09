@@ -8,11 +8,8 @@ from docx import Document
 
 from utils.document_loader import DocumentLoader
 from langchain_utils.section_checker import SectionChecker
-from utils.parsers import (
-    split_leaflet_sections,
-    split_ohlp_sections,
-    split_recommendations
-)
+from utils.parsers import split_recommendations
+
 from utils.docx_writer import (
     build_replacements,
     replace_placeholders_in_doc,
@@ -20,6 +17,8 @@ from utils.docx_writer import (
     fill_comparison_table,
     save_with_timestamp,
 )
+
+from agents.orchestrator import SegmentationManager
 
 # Логгер для модуля генерации отчётов
 logger = logging.getLogger(__name__)
@@ -80,13 +79,19 @@ def generate_report(
         logger.info(f"  → {len(sections)} разделов: {sections}")
 
         # 4) Разбиение на секции
+        manager = SegmentationManager(
+            max_iterations=3,
+            initial_threshold=70,
+            threshold_step=-5,
+            mode=loader_test.doc_type,
+            use_llm_fallback=True,   # включаем LLM-фоллбэк
+            llm_provider=provider   # выбираем провайдера ('yandex', 'deepseek', 'openai' или 'ollama')
+        )
+        
+        
         logger.info("4) Разбиение текстов по разделам…")
-        if loader_test.doc_type == "leaflet":
-            test_blocks = split_leaflet_sections(test_text, sections)
-            ref_blocks = split_leaflet_sections(ref_text, sections)
-        else:
-            test_blocks = split_ohlp_sections(test_text, sections)
-            ref_blocks = split_ohlp_sections(ref_text, sections)
+        test_blocks, test_validation = manager.segment_and_validate(test_text, sections)
+        ref_blocks, ref_validation = manager.segment_and_validate(ref_text, sections)
         recs_blocks = split_recommendations(rec_text, sections)
         logger.info(
             f"  → blocks: TEST={len(test_blocks)}, REF={len(ref_blocks)}, REC={len(recs_blocks)}")

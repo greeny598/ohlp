@@ -11,6 +11,8 @@ import asyncio
 import inspect
 from difflib import get_close_matches
 from docx import Document
+from agents.orchestrator import SegmentationManager
+
 
 # --- Настройка логирования для отладки ---
 logging.basicConfig(
@@ -47,11 +49,11 @@ except ImportError as e:
     sys.exit(1)
 
 # ------------------- Настройки пользователя -------------------
-TEST_PATH = "test_data/lv_project.pdf"      # Замените на ваши реальные пути
-REF_PATH = "test_data/lv_etalon.pdf"
-REC_PATH = "test_data/recommendations_lv.docx"
+TEST_PATH = "test_data/primovist_ohlp.pdf"      # Замените на ваши реальные пути
+REF_PATH = "test_data/primovist_ohlp_etalon.pdf"
+REC_PATH = "test_data/recommendations_OHLP_labeled2.docx"
 TEMPLATE_DIR = "templates"
-TEMPLATE_NAME = "report_template_lv.docx"
+TEMPLATE_NAME = "report_template_ohlp_2.docx"
 PROVIDER = "yandex"
 OUTPUT_DIR = "results"
 PREFIX = "report_debug"
@@ -110,19 +112,36 @@ def run_debug_process():
             if row.cells[0].text.strip()
         ]
         logger.info(f"  → {len(sections)} разделов: {sections}")
+        
 
-        # 4) Разбиение на секции
-        logger.info("4) Разбиение текстов по разделам…")
-        if loader_test.doc_type == "leaflet":
-            test_blocks = split_leaflet_sections(test_text, sections)
-            ref_blocks = split_leaflet_sections(ref_text, sections)
-        else:
-            test_blocks = split_ohlp_sections(test_text, sections)
-            ref_blocks = split_ohlp_sections(ref_text, sections)
-
+        
+        manager = SegmentationManager(
+            max_iterations=3,
+            initial_threshold=70,
+            threshold_step=-5,
+            mode=loader_test.doc_type,
+            use_llm_fallback=True,   # включаем LLM-фоллбэк
+            llm_provider=PROVIDER    # выбираем провайдера ('yandex', 'deepseek', 'openai' или 'ollama')
+        )
+            
+        
+        test_blocks, test_validation = manager.segment_and_validate(test_text, sections)
+        ref_blocks, ref_validation = manager.segment_and_validate(ref_text, sections)
         recs_blocks = split_recommendations(rec_text, sections)
         logger.info(
             f"  → blocks: TEST={len(test_blocks)}, REF={len(ref_blocks)}, REC={len(recs_blocks)}")
+        
+        
+        # # 4) Разбиение на секции
+        # logger.info("4) Разбиение текстов по разделам…")
+        # if loader_test.doc_type == "leaflet":
+        #     test_blocks = split_leaflet_sections(test_text, sections)
+        #     ref_blocks = split_leaflet_sections(ref_text, sections)
+        # else:
+        #     test_blocks = split_ohlp_sections(test_text, sections)
+        #     ref_blocks = split_ohlp_sections(ref_text, sections)
+
+       
 
         # 5) Проверка рекомендаций
         logger.info("5) Проверка рекомендаций для каждого раздела…")
