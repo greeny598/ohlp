@@ -8,7 +8,7 @@ from docx import Document
 
 from utils.document_loader import DocumentLoader
 from langchain_utils.section_checker import SectionChecker
-from utils.parsers import split_recommendations
+from utils.parsers import split_recommendations, split_ohlp_sections
 
 from utils.docx_writer import (
     build_replacements,
@@ -18,10 +18,12 @@ from utils.docx_writer import (
     save_with_timestamp,
 )
 
-from agents.orchestrator import SegmentationManager
+from semantic_segmenter import segment_text_semantic
+
 
 # Логгер для модуля генерации отчётов
 logger = logging.getLogger(__name__)
+
 
 def generate_report(
     test_path: str,
@@ -61,7 +63,8 @@ def generate_report(
         logger.info(f"  → REC  ({rec_path}):  {len(rec_text)} chars")
 
         # 2) Инициализация SectionChecker
-        logger.info(f"2) Инициализация SectionChecker с провайдером: {provider}")
+        logger.info(
+            f"2) Инициализация SectionChecker с провайдером: {provider}")
         checker = SectionChecker(api_provider=provider)
 
         # 3) Загрузка шаблона и извлечение разделов
@@ -71,7 +74,8 @@ def generate_report(
             raise FileNotFoundError(f"Шаблон не найден: {template_path}")
         doc = Document(template_path)
         if len(doc.tables) < 3:
-            raise ValueError("В шаблоне недостаточно таблиц для извлечения списка разделов.")
+            raise ValueError(
+                "В шаблоне недостаточно таблиц для извлечения списка разделов.")
         sections_table = doc.tables[2]
         sections = [row.cells[0].text.strip()
                     for row in sections_table.rows[1:]
@@ -79,22 +83,14 @@ def generate_report(
         logger.info(f"  → {len(sections)} разделов: {sections}")
 
         # 4) Разбиение на секции
-        manager = SegmentationManager(
-            max_iterations=3,
-            initial_threshold=70,
-            threshold_step=-5,
-            mode=loader_test.doc_type,
-            use_llm_fallback=True,   # включаем LLM-фоллбэк
-            llm_provider=provider   # выбираем провайдера ('yandex', 'deepseek', 'openai' или 'ollama')
-        )
-        
-        
         logger.info("4) Разбиение текстов по разделам…")
-        test_blocks, test_validation = manager.segment_and_validate(test_text, sections)
-        ref_blocks, ref_validation = manager.segment_and_validate(ref_text, sections)
+        if loader_test.doc_type == "leaflet":
+          test_blocks = segment_text_semantic(test_text, sections)
+          ref_blocks = segment_text_semantic(ref_text, sections)
+        else:
+           test_blocks = split_ohlp_sections(test_text, sections)
+           ref_blocks = split_ohlp_sections(ref_text, sections)
         recs_blocks = split_recommendations(rec_text, sections)
-        logger.info(
-            f"  → blocks: TEST={len(test_blocks)}, REF={len(ref_blocks)}, REC={len(recs_blocks)}")
 
         # 5) Проверка рекомендаций
         logger.info("5) Проверка рекомендаций для каждого раздела…")
@@ -103,7 +99,8 @@ def generate_report(
             logger.info(f"  {idx}/{len(sections)}: раздел '{sec}'…")
             try:
                 actual_text = test_blocks.get(sec, "")
-                matches = get_close_matches(sec, recs_blocks.keys(), n=1, cutoff=0.7)
+                matches = get_close_matches(
+                    sec, recs_blocks.keys(), n=1, cutoff=0.7)
                 if not matches:
                     logger.warning(" – рекомендации не найдены, пропускаем")
                     continue
@@ -118,7 +115,8 @@ def generate_report(
                     f"    → recommendation (first 100): {str(result)[:100]}...")
                 recommendations[sec] = result
             except Exception as e:
-                logger.error(f"Ошибка при проверке рекомендаций для раздела '{sec}': {e}")
+                logger.error(
+                    f"Ошибка при проверке рекомендаций для раздела '{sec}': {e}")
                 logger.debug(traceback.format_exc())
                 recommendations[sec] = f"Ошибка: {e}"
 
@@ -147,7 +145,8 @@ def generate_report(
         # 7) Замена плейсхолдеров
         logger.info("7) Замена плейсхолдеров (имена, даты…)…")
         try:
-            replacements = build_replacements(loader_ref.drug_name, loader_test.drug_name)
+            replacements = build_replacements(
+                loader_ref.drug_name, loader_test.drug_name)
             replace_placeholders_in_doc(doc, replacements)
         except Exception as e:
             logger.error(f"Ошибка замены плейсхолдеров: {e}")
@@ -155,8 +154,14 @@ def generate_report(
 
         # 8) Сохранение отчёта
         logger.info("8) Сохранение итогового документа…")
+
+        original_filename = os.path.splitext(
+            os.path.basename(loader_test.file_path))[0]
+
         output_path = save_with_timestamp(
             doc,
+            filetype=loader_test.doc_type,
+            original_filename=original_filename,
             output_dir=output_dir,
             prefix=prefix
         )

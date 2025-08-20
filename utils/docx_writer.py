@@ -8,6 +8,7 @@ from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
 from docx.shared import Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_COLOR_INDEX
 from docx.shared import RGBColor
 from difflib import SequenceMatcher
 
@@ -96,33 +97,91 @@ def replace_placeholders_in_doc(doc: Document, replacements: dict):
     Заменяет все ключи из replacements на их значения в документе,
     во всех параграфах — включая таблицы любой вложенности.
     """
-    if not replacements:
-        return
-
-    # один паттерн из всех ключей (экраним спецсимволы)
-    pattern = re.compile("|".join(re.escape(k) for k in replacements.keys()))
+    # если есть replacements, подготовим регулярное выражение для поиска ключей
+    pattern = None
+    if replacements:
+        pattern = re.compile("|".join(re.escape(k) for k in replacements.keys()))
 
     for para in iter_paragraphs(doc):
         orig = para.text
-        # в один проход меняем сразу все вхождения
-        new = pattern.sub(lambda m: replacements[m.group(0)], orig)
-        if new == orig:
-            continue
+        # если есть что заменять, то заменяем все вхождения в один проход
+        if pattern is not None:
+            new = pattern.sub(lambda m: replacements[m.group(0)], orig)
+            if new != orig:
+                # пробегаемся по run'ам и правим только те, где есть текст
+                for run in para.runs:
+                    run_text = run.text
+                    replaced = pattern.sub(lambda m: replacements[m.group(0)], run_text)
+                    if replaced != run_text:
+                        run.text = replaced
 
-        # пробегаемся по run'ам и правим только те, где есть текст
-        for run in para.runs:
-            run_text = run.text
-            replaced = pattern.sub(
-                lambda m: replacements[m.group(0)], run_text)
-            if replaced != run_text:
-                run.text = replaced
+                # если placeholder выпадал между runs и не был пойман,
+                # можно на крайний случай очистить и вставить один run:
+                if para.text != new:
+                    for run in para.runs:
+                        run.text = ""
+                    para.add_run(new)
 
-        # если placeholder выпадал между runs и не был пойман,
-        # можно на крайний случай очистить и вставить один run:
-        if para.text != new:
+        # после замены (или если замен нет) подсветим только целевые подстроки
+        # например: <!-- formula-not-decoded --> и <!-- image -->. Для этого
+        # проходим по run'ам, разбиваем текст run'а по любому из target-строк
+        # и создаём новые run'ы с сохранением форматирования.
+        # список подстрок, требующих подсветки
+        targets = ["<!-- formula-not-decoded -->", "<!-- image -->"]
+        # если в абзаце нет ни одной целевой подстроки, ничего делать не нужно
+        if any(t in para.text for t in targets):
+            # регулярное выражение, которое выделяет любую из целевых подстрок,
+            # захватывая её в результирующих частях
+            pattern_highlight = re.compile("(" + "|".join(re.escape(t) for t in targets) + ")")
+            new_fragments = []  # (text, formatting_dict, highlight_flag)
+            for run in para.runs:
+                text = run.text
+                # собрать формат run'а
+                fmt = {
+                    'bold': run.bold,
+                    'italic': run.italic,
+                    'underline': run.underline,
+                    'font_name': run.font.name,
+                    'font_size': run.font.size,
+                    'color': run.font.color.rgb if run.font.color and run.font.color.rgb else None,
+                    'highlight': run.font.highlight_color
+                }
+                if text:
+                    # разделить текст на части, включая целевые подстроки
+                    parts = pattern_highlight.split(text)
+                    for part in parts:
+                        if not part:
+                            continue
+                        if part in targets:
+                            new_fragments.append((part, fmt, True))
+                        else:
+                            new_fragments.append((part, fmt, False))
+            # очистить существующие run'ы (оставим пустые, новые добавим в конец)
             for run in para.runs:
                 run.text = ""
-            para.add_run(new)
+            # добавить новые run'ы с нужным форматированием
+            for text, fmt, highlight in new_fragments:
+                new_run = para.add_run(text)
+                # восстановить форматирование
+                new_run.bold = fmt['bold']
+                new_run.italic = fmt['italic']
+                new_run.underline = fmt['underline']
+                if fmt['font_name']:
+                    new_run.font.name = fmt['font_name']
+                if fmt['font_size']:
+                    new_run.font.size = fmt['font_size']
+                # если это целевой фрагмент, подкрашиваем
+                if highlight:
+                    new_run.font.color.rgb = RGBColor(0, 0, 0)
+                    new_run.font.highlight_color = WD_COLOR_INDEX.RED
+                else:
+                    # восстанавливаем цвет, если был задан
+                    if fmt['color']:
+                        new_run.font.color.rgb = fmt['color']
+                    # восстанавливаем существующую подсветку
+                    if fmt['highlight']:
+                        new_run.font.highlight_color = fmt['highlight']
+
 
 
 def _extract_from_header(doc: Document) -> Tuple[str, str]:
@@ -210,6 +269,8 @@ def fill_comparison_table(doc: Document,
 
 
 def save_with_timestamp(doc: Document,
+                        filetype: str,
+                        original_filename: str,
                         output_dir: str = "results",
                         prefix: str = "report") -> str:
     """
@@ -217,8 +278,8 @@ def save_with_timestamp(doc: Document,
     prefix_DD_MM_YY(HH_MM_SS).docx, возвращает путь.
     """
     os.makedirs(output_dir, exist_ok=True)
-    ts = datetime.now().strftime("%d_%m_%y_%H_%M_%S")
-    filename = f"{prefix}_{ts}.docx"
+    ts = datetime.now().strftime("%d.%m.%y_(%H-%M-%S)")
+    filename = f"{prefix}_{filetype}_{original_filename}_{ts}.docx"
     path = os.path.join(output_dir, filename)
     doc.save(path)
     return path
