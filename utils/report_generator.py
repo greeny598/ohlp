@@ -7,6 +7,7 @@ from difflib import get_close_matches
 from docx import Document
 
 from utils.document_loader import DocumentLoader
+from threading import Lock
 from langchain_utils.section_checker import SectionChecker
 from utils.parsers import split_recommendations, split_ohlp_sections
 
@@ -24,6 +25,20 @@ from semantic_segmenter import segment_text_semantic
 # Логгер для модуля генерации отчётов
 logger = logging.getLogger(__name__)
 
+# будем кэшировать текст рекомендаций
+_recommendation_cache = {}
+_cache_lock = Lock()
+
+
+def load_cached_recommendations(rec_path: str):
+    with _cache_lock:
+        if rec_path not in _recommendation_cache:
+            _recommendation_cache[rec_path] = DocumentLoader(
+                rec_path).simple_load()
+            logger.info("Загружаем рекомендации в кэш")
+    logger.info("Используем кэшированный файл рекомендаций")
+    return _recommendation_cache[rec_path]
+
 
 def generate_report(
     test_path: str,
@@ -36,7 +51,8 @@ def generate_report(
     prefix: str
 ) -> str:
     """
-    Генерация отчёта на основе тестовой инструкции, эталонной инструкции и рекомендаций.
+    Генерация отчёта на основе тестовой инструкции,
+    эталонной инструкции и рекомендаций.
     Возвращает путь к сгенерированному отчёту .docx.
 
     template_dir: путь к папке с шаблонами
@@ -51,15 +67,17 @@ def generate_report(
         loader_test = DocumentLoader(test_path)
         test_text = loader_test.load()
         logger.info(f"  → TEST ({test_path}): {len(test_text)} chars, "
-                    f"type={loader_test.doc_type}, drug={loader_test.drug_name!r}")
+                    f"type={loader_test.doc_type},\
+                        drug={loader_test.drug_name!r}")
 
         loader_ref = DocumentLoader(ref_path)
         ref_text = loader_ref.load()
         logger.info(f"  → REF  ({ref_path}):  {len(ref_text)} chars, "
-                    f"type={loader_ref.doc_type}, drug={loader_ref.drug_name!r}")
+                    f"type={loader_ref.doc_type},\
+                        drug={loader_ref.drug_name!r}")
 
-        loader_rec = DocumentLoader(rec_path)
-        rec_text = loader_rec.simple_load()
+        # используем кэшированные рекомендации
+        rec_text = load_cached_recommendations(rec_path)
         logger.info(f"  → REC  ({rec_path}):  {len(rec_text)} chars")
 
         # 2) Инициализация SectionChecker
