@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Tuple
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
-from docx.shared import Cm
+from docx.shared import Cm, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.text import WD_COLOR_INDEX
 from docx.shared import RGBColor
@@ -63,8 +63,10 @@ def insert_recommendations(doc: Document, recommendations: Dict[str, Any]) -> No
                 # section key bold
                 run_section = p.add_run(f"{key}: ")
                 run_section.bold = True
+                run_section.font.size = Pt(14)
                 # comment normal
-                p.add_run(comment)
+                run_comment = p.add_run(comment)
+                run_comment.font.size = Pt(14)
                 prev = p
             break
 
@@ -114,13 +116,15 @@ def replace_placeholders_in_doc(doc: Document, replacements: dict):
                     replaced = pattern.sub(lambda m: replacements[m.group(0)], run_text)
                     if replaced != run_text:
                         run.text = replaced
+                        run.font.size = Pt(14)
 
                 # если placeholder выпадал между runs и не был пойман,
                 # можно на крайний случай очистить и вставить один run:
                 if para.text != new:
                     for run in para.runs:
                         run.text = ""
-                    para.add_run(new)
+                    new_run = para.add_run(new)
+                    new_run.font.size = Pt(14)
 
         # после замены (или если замен нет) подсветим только целевые подстроки
         # например: <!-- formula-not-decoded --> и <!-- image -->. Для этого

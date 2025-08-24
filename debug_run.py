@@ -11,7 +11,7 @@ import asyncio
 import inspect
 from difflib import get_close_matches
 from docx import Document
-from agents.orchestrator import SegmentationManager
+
 
 from semantic_segmenter import segment_text_semantic
 

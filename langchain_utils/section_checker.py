@@ -1,6 +1,7 @@
 import logging
 from typing import Dict, Any, Literal
 import json
+import requests
 
 from pydantic import BaseModel, validator, Extra, ValidationError
 from langchain.prompts import PromptTemplate
@@ -29,14 +30,13 @@ class Recommendation(BaseModel):
             return json.dumps(v, ensure_ascii=False)
         return str(v)
 
-
 class SectionChecker:
     def __init__(self, api_provider: str = 'yandex'):
         self.yandexgpt_key = config.yandexgpt_KEY.get_secret_value()
         self.yandex_cloud_folder_id = config.yandex_cloud_folder_id.get_secret_value()
-        self.deepseek_key = config.deepseek_KEY.get_secret_value()
-        self.openai_key = config.openai_KEY.get_secret_value()
-        self.llm = self._set_api_provider(api_provider)
+        #self.deepseek_key = config.deepseek_KEY.get_secret_value()
+        #self.openai_key = config.openai_KEY.get_secret_value()
+        self.llm = self._set_api_provider(api_provider)            
         self.prompt_diffs = self._create_diffs_prompt_template()
         self.chain_diffs = RunnableSequence(self.prompt_diffs | self.llm)
         self.prompt_recs = self._create_recs_prompt_template()
@@ -47,7 +47,7 @@ class SectionChecker:
             return YandexGPT(
                 api_key=self.yandexgpt_key,
                 folder_id=self.yandex_cloud_folder_id,
-                modelUri=f"gpt://{self.yandex_cloud_folder_id}/yandexgpt",
+                modelUri=f"gpt://{self.yandex_cloud_folder_id}/yandexgpt/latest",
                 temperature=0.2,
                 maxTokens=2000
             )
