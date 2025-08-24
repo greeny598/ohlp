@@ -188,45 +188,45 @@ def replace_placeholders_in_doc(doc: Document, replacements: dict):
 
 
 
-def _extract_from_header(doc: Document) -> Tuple[str, str]:
-    import re
-    # 1) найти параграф с «Листок‑вкладыш»
-    paras = [p.text.strip() for p in doc.paragraphs]
-    idx = next(i for i, t in enumerate(paras)
-               if t.startswith("Листок‑вкладыш"))
-    # 2) собрать следующие непустые строки до первого пустого
-    names = []
-    for line in paras[idx+1:]:
-        if not line:
-            break
-        # отберите только строки с указанием mg
-        if re.search(r'\d+\s*мг', line):
-            names.append(line)
-    # 3) из каждой строки взять часть до первого «,»
-    drugs = [ln.split(',', 1)[0].strip() for ln in names]
-    # 4) убрать дубликаты и взять первые две
-    seen = []
-    for d in drugs:
-        if d not in seen:
-            seen.append(d)
-    ref = seen[0] if seen else ''
-    test = seen[1] if len(seen) > 1 else seen[0] if seen else ''
-    return ref, test
+# def _extract_from_header(doc: Document) -> Tuple[str, str]:
+    # import re
+    # # 1) найти параграф с «Листок‑вкладыш»
+    # paras = [p.text.strip() for p in doc.paragraphs]
+    # idx = next(i for i, t in enumerate(paras)
+               # if t.startswith("Листок‑вкладыш"))
+    # # 2) собрать следующие непустые строки до первого пустого
+    # names = []
+    # for line in paras[idx+1:]:
+        # if not line:
+            # break
+        # # отберите только строки с указанием mg
+        # if re.search(r'\d+\s*мг', line):
+            # names.append(line)
+    # # 3) из каждой строки взять часть до первого «,»
+    # drugs = [ln.split(',', 1)[0].strip() for ln in names]
+    # # 4) убрать дубликаты и взять первые две
+    # seen = []
+    # for d in drugs:
+        # if d not in seen:
+            # seen.append(d)
+    # ref = seen[0] if seen else ''
+    # test = seen[1] if len(seen) > 1 else seen[0] if seen else ''
+    # return ref, test
 
 
-def extract_drug_names(doc: Document, table_index: int = 2) -> Tuple[str, str]:
-    """
-    Из таблицы под индексом table_index берёт названия препаратов
-    в строке 2 (cells[0] и cells[1]), отсекая всё до \n и очищая.
-    Возвращает (ref_name, test_name).
-    """
-    def clean(name: str) -> str:
-        return re.sub(r'[.,;:!?()\[\]{}«»"\']+$', '', name.strip())
-    table = doc.tables[table_index]
-    # первая строка — заголовок, вторая — названия
-    raw_ref = table.rows[1].cells[0].text.partition('\n')[2]
-    raw_test = table.rows[1].cells[1].text.partition('\n')[2]
-    return clean(raw_ref), clean(raw_test)
+# def extract_drug_names(doc: Document, table_index: int = 2) -> Tuple[str, str]:
+    # """
+    # Из таблицы под индексом table_index берёт названия препаратов
+    # в строке 2 (cells[0] и cells[1]), отсекая всё до \n и очищая.
+    # Возвращает (ref_name, test_name).
+    # """
+    # def clean(name: str) -> str:
+        # return re.sub(r'[.,;:!?()\[\]{}«»"\']+$', '', name.strip())
+    # table = doc.tables[table_index]
+    # # первая строка — заголовок, вторая — названия
+    # raw_ref = table.rows[1].cells[0].text.partition('\n')[2]
+    # raw_test = table.rows[1].cells[1].text.partition('\n')[2]
+    # return clean(raw_ref), clean(raw_test)
 
 
 def build_replacements(ref_name: str, test_name: str) -> Dict[str, str]:
