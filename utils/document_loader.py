@@ -1,8 +1,10 @@
 import logging
 import html
 import re
+from pathlib import Path
 from typing import Optional, Literal
-from docling.document_converter import DocumentConverter
+
+from utils.docling_singletons import get_docx_converter, get_pdf_converter
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,7 +17,7 @@ class DocumentLoader:
     """
     Загружает и предобрабатывает два типа документов:
     — ohlp (общая характеристика)
-    — leaflet (листок‑вкладыш)
+    — leaflet (листок-вкладыш)
     Сохраняет:
       • doc_type: «ohlp» или «leaflet»
       • drug_name: название действующего вещества / препарата
@@ -63,6 +65,11 @@ class DocumentLoader:
         leaflet_score = sum(bool(re.search(p, text, re.IGNORECASE))
                             for p in leaflet_patterns)
         return "ohlp" if ohlp_score >= leaflet_score else "leaflet"
+
+    def _get_converter(self):
+        """Return a cached Docling converter based on file extension."""
+        ext = Path(self.file_path).suffix.lower()
+        return get_pdf_converter() if ext == ".pdf" else get_docx_converter()
 
     def _extract_drug_name_leaflet(self, text: str) -> str:
         """
@@ -158,7 +165,7 @@ class DocumentLoader:
         4) чистит через соответствующий метод
         5) при auto_structure для leaflet — дополнительно структурирует
         """
-        converter = DocumentConverter()
+        converter = self._get_converter()
         result = converter.convert(self.file_path)
         self._doc = result.document
 
@@ -228,7 +235,7 @@ class DocumentLoader:
         и запятых. Используем для загрузки рекомендаций
         """
         try:
-            converter = DocumentConverter()
+            converter = self._get_converter()
             result = converter.convert(self.file_path)
             raw_text = result.document.export_to_markdown()
             logger.info(f"[Исходный текст]:\n{raw_text[:1000]}")

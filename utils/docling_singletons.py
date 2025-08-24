@@ -8,8 +8,8 @@ Created on Thu Aug 21 00:51:59 2025
 # utils/docling_singletons.py
 from threading import Lock
 from docling.document_converter import DocumentConverter
-# псевдоимпорты, подставь реальные
-from docling.pipelines import StandardPdfPipeline, SimplePipeline
+from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline
+from docling.pipeline.simple_pipeline import SimplePipeline
 
 
 _pdf_converter = None
@@ -34,6 +34,4 @@ def get_docx_converter():
         return _docx_converter
     with _lock:
         if _docx_converter is None:
-            pipeline = SimplePipeline()  # подставь твой нужный конвертер для DOCX
-            _docx_converter = DocumentConverter(pipeline=pipeline)
-    return _docx_converter
+            pipeline = SimplePipeline()
