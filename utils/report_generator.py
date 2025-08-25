@@ -9,7 +9,7 @@ from docx import Document
 from utils.document_loader import DocumentLoader
 from threading import Lock
 from langchain_utils.section_checker import SectionChecker
-from utils.parsers import split_recommendations, split_ohlp_sections
+from utils.parsers import split_recommendations
 
 from utils.docx_writer import (
     build_replacements,
@@ -20,6 +20,7 @@ from utils.docx_writer import (
 )
 
 from semantic_segmenter import segment_text_semantic
+from ohlp_parser import split_ohlp_sections
 
 
 # Логгер для модуля генерации отчётов
@@ -155,7 +156,10 @@ def generate_report(
             for sec in sections
         ]
         try:
-            fill_comparison_table(doc, compare_data, table_index=2)
+            fill_comparison_table(
+            doc,
+            compare_data,
+            table_index=2)
         except Exception as e:
             logger.error(f"Ошибка заполнения таблицы сравнения: {e}")
             logger.debug(traceback.format_exc())

@@ -34,7 +34,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--host", "-H",
-    default="127.0.0.1",
+    default="0.0.0.0",
     help="Адрес сервера Gradio"
 )
 parser.add_argument(

@@ -1,8 +1,10 @@
 import logging
 import html
 import re
+import unicodedata
 from pathlib import Path
 from typing import Optional, Literal
+
 
 from utils.docling_singletons import get_docx_converter, get_pdf_converter
 
@@ -108,16 +110,43 @@ class DocumentLoader:
             logger.warning(
                 f"[Ошибка при извлечении названия препарата из ОХЛП]: {e}")
         return ""
+    
+    def _normalize_bullets_keep(self, text: str, style: str = "dot") -> str:
+        """
+        Приводит маркеры списков к читаемому виду и сохраняет их в тексте.
+        style: "dot" -> •  (по умолчанию),  "dash" -> –  (если хотите тире-списки)
+        """
+        text = unicodedata.normalize("NFKC", text)
 
+        # Все «экзотические» буллеты и PUA → суррогатный маркер BUL
+        # (работаем только в начале строк — настоящие маркеры)
+        BULLET_CHARS = (
+            r"\u2022\u2023\u25E6\u2219\u00B7\u25CF\u25AA\u25A0\u2043"  # стандартные буллеты
+            r"\uF000-\uF8FF"                                         # приватные (PUA), где и сидит 
+            r"\-\u2013\u2014"                                        # -, – , —
+        )
+        # заменим все такие маркеры в начале строк на токен, сохранив перевод строки
+        def _mark(m):
+            return "⟦BUL⟧ "
+
+        text = re.sub(fr"(?m)^\s*([{BULLET_CHARS}])\s+", _mark, text)
+
+        # теперь токен превращаем в выбранный вид
+        bullet = "•" if style == "dot" else "–"
+        text = text.replace("⟦BUL⟧", bullet)
+
+        return text
+    
     def _clean_common(self, text: str) -> str:
-        """
-        Общие правила предобработки для обоих типов
-        """
         text = html.unescape(text)
+
+        # 1) Сначала нормализуем маркеры и оставляем их в тексте
+        text = self._normalize_bullets_keep(text, style="dot")  # или "dash"
+        
+        # остальной пайплайн можно оставить:
         text = re.sub(r"^#+\s+", "", text, flags=re.MULTILINE)
-        text = re.sub(r"^[\-\*\+]\s+", "", text, flags=re.MULTILINE)
         text = re.sub(r"(?mi)^[Pp]age\s*\d+\s*$|^\d+\s*$", "", text)
-        text = re.sub(r"(\w)\s*[-–—]\s*(\w)", r"\1-\2", text)
+        text = re.sub(r"(\w)\s*[-–—]\s*(\w)", r"\1-\2", text)  # не трогает наши буллеты
         text = re.sub(r"(?<![\.:!?])\n(?=[А-ЯA-Za-z0-9])", " ", text)
         text = re.sub(r"[ \t]+", " ", text)
         text = re.sub(r"\s+([,.;:!?])", r"\1", text)
