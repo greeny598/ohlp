@@ -206,3 +206,69 @@ class SectionChecker:
         except Exception as e:
             logger.error(f"Ошибка при обработке recommends: {e}")
             return {'compliance': 'not_complied', 'comments': ''}
+    
+    async def check_recommends_async(self,
+                                     recommendations_text: str,
+                                     actual_text: str) -> Dict[str, Any]:
+        """
+        Асинхронная версия проверки соответствия раздела рекомендациям.
+        Возвращает объект с полями: {"compliance": "...", "comments": "..."}.
+        """
+        try:
+            # Асинхронный вызов цепочки LangChain
+            response = await self.chain_recs.ainvoke({
+                "recommendations_text": recommendations_text,
+                "actual_text": actual_text
+            })
+            raw = getattr(response, 'content', response)
+
+            # Приведение к списку словарей (полная совместимость с sync-версией)
+            parsed = []
+            if isinstance(raw, str):
+                try:
+                    tmp = parse_json_markdown(raw)
+                except Exception as err:
+                    logger.error(f"Парсинг JSON провален: {err}")
+                    tmp = []
+                if isinstance(tmp, dict):
+                    parsed = [tmp]
+                elif isinstance(tmp, list):
+                    parsed = tmp
+            elif isinstance(raw, list):
+                parsed = raw
+
+            # Валидация и автокорректировка (как в sync-версии)
+            recommendations: Any = None
+            for idx, rec in enumerate(parsed):
+                if not isinstance(rec, dict):
+                    logger.warning(f"Элемент #{idx} не dict, пропускаем: {rec!r}")
+                    continue
+                try:
+                    rec_obj = Recommendation.parse_obj(rec)
+                    recommendations = rec_obj.dict()
+                    break  # берём первый валидный
+                except ValidationError as ve:
+                    logger.warning(f"Validation failed #{idx}: {ve}")
+                    # попытка починки comments
+                    rec_fixed = rec.copy()
+                    rec_fixed['comments'] = json.dumps(
+                        rec_fixed.get('comments', ''),
+                        ensure_ascii=False
+                    )
+                    try:
+                        rec_obj = Recommendation.parse_obj(rec_fixed)
+                        recommendations = rec_obj.dict()
+                        break
+                    except ValidationError:
+                        logger.error(f"Не удалось починить элемент #{idx}.")
+
+            if recommendations:
+                return recommendations
+
+            # если ни один элемент не прошёл — возвращаем дефолт
+            logger.error("Нет валидных рекомендаций для раздела")
+            return {'compliance': 'not_complied', 'comments': ''}
+
+        except Exception as e:
+            logger.error(f"Ошибка при обработке recommends (async): {e}")
+            return {'compliance': 'not_complied', 'comments': ''}

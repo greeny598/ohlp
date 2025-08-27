@@ -3,6 +3,7 @@ import glob
 import os
 import argparse
 import logging
+import asyncio
 
 # --- Настройка логирования ---
 logging.basicConfig(
@@ -18,34 +19,29 @@ import gradio as gr
 # Импорт новой функции генерации отчета
 # Предполагается, что в utils/__init__.py есть: from .report_generator import generate_report
 # или можно импортировать напрямую:
-from utils.report_generator import generate_report
+#from utils.report_generator import generate_report
+from utils.report_generator import generate_report_async
 
-
-logger = logging.getLogger(__name__)  # Логгер для main.py
+logger = logging.getLogger(__name__)
 
 # --- Настройка аргументов командной строки ---
 parser = argparse.ArgumentParser(
     description="Генерация отчета с возможностью выбора провайдера API и параметров сервера Gradio."
 )
 parser.add_argument(
-    "--provider", "-p",
-    default="yandex",
+    "--provider", "-p", default="yandex",
     help="Имя провайдера для SectionChecker (по умолчанию 'yandex')"
 )
 parser.add_argument(
-    "--host", "-H",
-    default="0.0.0.0",
+    "--host", "-H", default="0.0.0.0",
     help="Адрес сервера Gradio"
 )
 parser.add_argument(
-    "--port", "-P",
-    type=int,
-    default=7860,
+    "--port", "-P", type=int, default=7860,
     help="Порт сервера Gradio"
 )
 parser.add_argument(
-    "--share", "-s",
-    action="store_true",
+    "--share", "-s", action="store_true",
     help="Включить публичный шаринг Gradio"
 )
 args = parser.parse_args()
@@ -121,25 +117,29 @@ with gr.Blocks(css=custom_css) as iface:
         interactive=True
     )
 
-    output_file = gr.File(
-        label="📤 DOCX-отчет"
-    )
+    output_file = gr.File(label="📤 DOCX-отчет")
 
-    compare_btn = gr.Button("🔍 Сравнить и сформировать отчет")
-    compare_btn.click(
-        fn=lambda t, r, c, tmpl: generate_report(
+    # --- Асинхронный обработчик кнопки ---
+    async def on_compare(t, r, c, tmpl):
+        return await generate_report_async(
             t, r, c, tmpl,
             template_dir=TEMPLATE_DIR,
             output_dir=OUTPUT_DIR,
             provider=PROVIDER,
             prefix=REPORT_PREFIX
-        ),
+        )
+
+    compare_btn = gr.Button("🔍 Сравнить и сформировать отчет")
+    compare_btn.click(
+        fn=on_compare,
         inputs=[test_input, ref_input, rec_input, tmpl_input],
         outputs=output_file,
-        show_progress=True
+        show_progress=True,
+        concurrency_limit=3  # разрешить до 3 параллельных задач для этого события
     )
 
-    iface.queue()
+    # Разрешаем нескольким обработчикам выполняться параллельно и ограничиваем длину очереди
+    iface.queue(default_concurrency_limit=3, max_size=10)
 
 # --- Точка входа ---
 if __name__ == "__main__":

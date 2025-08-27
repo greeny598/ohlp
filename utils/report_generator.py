@@ -195,3 +195,150 @@ def generate_report(
         logger.critical(f"Невозможно сгенерировать отчёт: {e}")
         logger.debug(traceback.format_exc())
         raise
+
+async def generate_report_async(
+    test_path: str,
+    ref_path: str,
+    rec_path: str,
+    template_name: str,
+    template_dir: str,
+    output_dir: str,
+    provider: str,
+    prefix: str
+) -> str:
+    """
+    Асинхронная генерация отчёта на основе тестовой инструкции,
+    эталонной инструкции и рекомендаций.
+    Возвращает путь к сгенерированному отчёту .docx.
+    """
+    logger.info("=== [async] Начало генерации отчёта ===")
+    try:
+        # 1) Извлечение текстов (параллельно)
+        logger.info("1) [async] Извлечение текстов из документов…")
+        loader_test = DocumentLoader(test_path)
+        loader_ref = DocumentLoader(ref_path)
+
+        test_text, ref_text = await asyncio.gather(
+            asyncio.to_thread(loader_test.load),
+            asyncio.to_thread(loader_ref.load)
+        )
+        logger.info(f"  → TEST ({test_path}): {len(test_text)} chars, "
+                    f"type={loader_test.doc_type}, drug={loader_test.drug_name!r}")
+        logger.info(f"  → REF  ({ref_path}):  {len(ref_text)} chars, "
+                    f"type={loader_ref.doc_type}, drug={loader_ref.drug_name!r}")
+
+        # используем кэшированные рекомендации (в отдельном потоке)
+        rec_text = await asyncio.to_thread(load_cached_recommendations, rec_path)
+        logger.info(f"  → REC  ({rec_path}):  {len(rec_text)} chars")
+
+        # 2) Инициализация SectionChecker
+        logger.info(f"2) [async] Инициализация SectionChecker с провайдером: {provider}")
+        checker = SectionChecker(api_provider=provider)
+
+        # 3) Загрузка шаблона и извлечение разделов
+        logger.info("3) [async] Загрузка шаблона и извлечение списка разделов…")
+        template_path = os.path.join(template_dir, template_name)
+        if not os.path.exists(template_path):
+            raise FileNotFoundError(f"Шаблон не найден: {template_path}")
+        doc = Document(template_path)
+        if len(doc.tables) < 3:
+            raise ValueError("В шаблоне недостаточно таблиц для извлечения списка разделов.")
+        sections_table = doc.tables[2]
+        sections = [row.cells[0].text.strip()
+                    for row in sections_table.rows[1:]
+                    if row.cells[0].text.strip()]
+        logger.info(f"  → {len(sections)} разделов: {sections}")
+
+        # 4) Разбиение на секции (параллельно в пуле потоков)
+        logger.info("4) [async] Разбиение текстов по разделам…")
+        if loader_test.doc_type == "leaflet":
+            test_blocks, ref_blocks = await asyncio.gather(
+                asyncio.to_thread(segment_text_semantic, test_text, sections),
+                asyncio.to_thread(segment_text_semantic, ref_text, sections),
+            )
+        else:
+            test_blocks, ref_blocks = await asyncio.gather(
+                asyncio.to_thread(split_ohlp_sections, test_text, sections),
+                asyncio.to_thread(split_ohlp_sections, ref_text, sections),
+            )
+        recs_blocks = await asyncio.to_thread(split_recommendations, rec_text, sections)
+
+        # 5) Проверка рекомендаций (параллельно с ограничением семафором)
+        logger.info("5) [async] Проверка рекомендаций для каждого раздела…")
+        sem = asyncio.Semaphore(5)  # настройте под лимиты провайдера/ресурсов
+
+        async def check_one(sec: str):
+            logger.info(f"  → раздел '{sec}'…")
+            actual_text = test_blocks.get(sec, "")
+            matches = get_close_matches(sec, recs_blocks.keys(), n=1, cutoff=0.7)
+            if not matches:
+                logger.warning(f"    – рекомендации не найдены для '{sec}', пропускаем")
+                return sec, {'compliance': 'not_complied', 'comments': ''}
+
+            rec_part = recs_blocks[matches[0]]
+            if not rec_part.strip():
+                logger.debug(f"    – рекомендации пусты для '{sec}', пропускаем")
+                return sec, {'compliance': 'not_complied', 'comments': ''}
+
+            async with sem:
+                try:
+                    result = await checker.check_recommends_async(rec_part, actual_text)
+                    logger.info(f"    → recommendation (first 100): {str(result)[:100]}…")
+                    return sec, result
+                except Exception as e:
+                    logger.error(f"Ошибка при проверке рекомендаций для '{sec}': {e}")
+                    logger.debug(traceback.format_exc())
+                    return sec, {'compliance': 'not_complied', 'comments': f'Ошибка: {e}'}
+
+        results = await asyncio.gather(*(check_one(sec) for sec in sections))
+        recommendations = {sec: rec for sec, rec in results}
+
+        # 6) Вставка рекомендаций и заполнение таблицы
+        logger.info("6) [async] Вставка рекомендаций и заполнение таблицы…")
+        try:
+            insert_recommendations(doc, recommendations)
+        except Exception as e:
+            logger.error(f"Ошибка вставки рекомендаций: {e}")
+            logger.debug(traceback.format_exc())
+
+        compare_data = [
+            {
+                "Раздел": sec,
+                "Содержимое референтного документа": ref_blocks.get(sec, ""),
+                "Содержимое тестируемого документа": test_blocks.get(sec, ""),
+            }
+            for sec in sections
+        ]
+        try:
+            fill_comparison_table(doc, compare_data, table_index=2)
+        except Exception as e:
+            logger.error(f"Ошибка заполнения таблицы сравнения: {e}")
+            logger.debug(traceback.format_exc())
+
+        # 7) Замена плейсхолдеров
+        logger.info("7) [async] Замена плейсхолдеров (имена, даты…)…")
+        try:
+            replacements = build_replacements(loader_ref.drug_name, loader_test.drug_name)
+            replace_placeholders_in_doc(doc, replacements)
+        except Exception as e:
+            logger.error(f"Ошибка замены плейсхолдеров: {e}")
+            logger.debug(traceback.format_exc())
+
+        # 8) Сохранение отчёта
+        logger.info("8) [async] Сохранение итогового документа…")
+        original_filename = os.path.splitext(os.path.basename(loader_test.file_path))[0]
+        output_path = save_with_timestamp(
+            doc,
+            filetype=loader_test.doc_type,
+            original_filename=original_filename,
+            output_dir=output_dir,
+            prefix=prefix
+        )
+        logger.info(f"[async] Отчёт сохранён: {output_path}")
+        logger.info("=== [async] Генерация отчёта завершена ===")
+        return output_path
+
+    except Exception as e:
+        logger.critical(f"[async] Невозможно сгенерировать отчёт: {e}")
+        logger.debug(traceback.format_exc())
+        raise
