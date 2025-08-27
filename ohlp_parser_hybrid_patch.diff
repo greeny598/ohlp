@@ -1,0 +1,83 @@
+--- ohlp_parser.py
++++ ohlp_parser.py
+@@ -219,6 +219,25 @@
+     return difflib.SequenceMatcher(None, a, b).ratio()
+ 
+ 
++def _jaccard(a: str, b: str) -> float:
++    A, B = set(a.split()), set(b.split())
++    return len(A & B) / len(A | B) if A and B else 0.0
++
++def _containment(a: str, b: str) -> float:
++    A, B = set(a.split()), set(b.split())
++    return len(A & B) / len(A) if A else 0.0
++
++def _hybrid_score(tmpl_norm: str, cand_norm: str) -> float:
++    """Комбинированная метрика схожести заголовков.
++    Усиливает устойчивость к обрывам/склейкам слов.
++    Весим покрытие токенов выше символьной похожести.
++    """
++    sm = difflib.SequenceMatcher(None, cand_norm, tmpl_norm).ratio()
++    jac = _jaccard(cand_norm, tmpl_norm)
++    cont = _containment(cand_norm, tmpl_norm)
++    return 0.5 * cont + 0.3 * sm + 0.2 * jac
++
++
+ def split_ohlp_sections(
+     text: str,
+     sections: List[str],
+@@ -241,25 +260,36 @@
+     idx_to_num, idx_to_title_norm, num_to_indices = _extract_template_info(sections)
+     # ищем кандидаты в тексте
+     candidates = _find_candidate_headings(clean_text)
+-    # собираем для каждого раздела позицию и lines_count
+-    # по умолчанию None
+-    section_pos: Dict[int, Tuple[int, int]] = {}  # idx -> (pos, lines_count)
+-    # для каждого кандидата пытаемся привязать к разделу
+-    for pos, num, title, level, lines_count in candidates:
+-        # если номера такого нет в шаблоне, пропускаем
+-        if num not in num_to_indices:
+-            continue
+-        cand_norm = _normalize_text(title)
+-        # перебираем все индексы этого номера
+-        for idx in num_to_indices[num]:
+-            templ_norm = idx_to_title_norm.get(idx, "")
+-            sim = _similarity(cand_norm, templ_norm)
+-            if sim < threshold:
+-                continue
+-            # если позиция ещё не заполнена или новая позиция раньше, берём её
+-            if idx not in section_pos or pos < section_pos[idx][0]:
+-                section_pos[idx] = (pos, lines_count)
+-    # формируем список стартов по порядку секций
++    # подготавливаем индекс кандидатов и монотонное сопоставление с fallback по номеру
++    cand_by_num: Dict[str, List[Tuple[int, str, str, int, int]]] = {}
++    for c in candidates:
++        cand_by_num.setdefault(c[1], []).append(c)
++    for arr in cand_by_num.values():
++        arr.sort(key=lambda x: x[0])
++
++    section_pos: Dict[int, Tuple[int, int]] = {}
++    prev_pos = -1
++    for idx, sec in enumerate(sections):
++        num = idx_to_num.get(idx)
++        if not num:
++            continue
++        arr = [c for c in cand_by_num.get(num, []) if c[0] > prev_pos]
++        if not arr:
++            continue
++        tmpl_norm = idx_to_title_norm.get(idx, "")
++        best = None
++        best_score = -1.0
++        for c in arr:
++            cand_norm = _normalize_text(c[2])
++            s = _hybrid_score(tmpl_norm, cand_norm)
++            if s > best_score:
++                best_score = s; best = c
++        chosen = best if best_score >= threshold else (arr[0] if '.' in num else None)
++        if chosen is None:
++            continue
++        section_pos[idx] = (chosen[0], chosen[4])
++        prev_pos = chosen[0]
+ # формируем список стартов по порядку секций
+     # пара (idx, pos, lines_count); pos=None если нет
+     starts: List[Tuple[int, Optional[int], int]] = []
