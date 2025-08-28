@@ -1,8 +1,10 @@
 import logging
 import html
 import re
+import unicodedata
 from pathlib import Path
 from typing import Optional, Literal
+
 
 from utils.docling_singletons import get_docx_converter, get_pdf_converter
 
@@ -108,16 +110,50 @@ class DocumentLoader:
             logger.warning(
                 f"[Ошибка при извлечении названия препарата из ОХЛП]: {e}")
         return ""
+    
+    def _normalize_bullets_keep(self, text: str, style: str = "dot") -> str:
+        """
+        Сохраняем маркеры списков в тексте, но приводим к одному виду.
+        Схлопывает к одному символу любой набор из: •, дефисы ( -, –, — ),
+        а также приватные PUA-глифы (там сидит '').
+        """
+        # Нормализуем и единообразно заменим NBSP
+        text = unicodedata.normalize("NFKC", text).replace("\u00A0", " ")
 
+        # Выбор целевого маркера
+        bullet = "•" if style == "dot" else "–"
+
+        # 1) Главная замена: в НАЧАЛЕ КАЖДОЙ СТРОКИ
+        # Схлопываем любой «пучок» (PUA, буллеты, дефисы) + пробелы → один маркер + пробел.
+        BULLET_CLUSTER = (
+            r"[\uF000-\uF8FF"              # приватные (PUA), в т.ч. ''
+            r"\u2022\u2023\u25E6\u2219"    # •, ‣, ◦, ∙
+            r"\u00B7\u25CF\u25AA\u25A0"    # ·, ●, ▪, ■
+            r"\u2043"                      # ⁃ (hyphen bullet)
+            r"\-\u2010\u2011\u2012\u2013\u2014]"  # -, ‐, -, ‒, –, —
+        )
+        # Если после «пучка» идут пробелы и дальше буква/цифра — считаем это пунктом списка
+        pattern = rf"(?m)^[ \t]*({BULLET_CLUSTER}(?:[ \t]*{BULLET_CLUSTER})*)[ \t]+(?=[0-9A-Za-zА-Яа-я])"
+        text = re.sub(pattern, bullet + " ", text)
+
+        # 2) Добивка частных кейсов после предыдущих правок:
+        #   • —/PUA/дефисы всё ещё остались после первого маркера → убираем их
+        text = re.sub(r"(?m)^" + re.escape(bullet) + r"[ \t]+(?:[\uF000-\uF8FF\-–—])+[ \t]+", bullet + " ", text)
+        #   • двойной буллет
+        text = re.sub(r"(?m)^" + re.escape(bullet) + r"[ \t]+" + re.escape(bullet) + r"[ \t]+", bullet + " ", text)
+
+        return text
+    
     def _clean_common(self, text: str) -> str:
-        """
-        Общие правила предобработки для обоих типов
-        """
         text = html.unescape(text)
+
+        # 1) Сначала нормализуем маркеры и оставляем их в тексте
+        text = self._normalize_bullets_keep(text, style="dot")  # или "dash"
+        
+        # остальной пайплайн можно оставить:
         text = re.sub(r"^#+\s+", "", text, flags=re.MULTILINE)
-        text = re.sub(r"^[\-\*\+]\s+", "", text, flags=re.MULTILINE)
         text = re.sub(r"(?mi)^[Pp]age\s*\d+\s*$|^\d+\s*$", "", text)
-        text = re.sub(r"(\w)\s*[-–—]\s*(\w)", r"\1-\2", text)
+        text = re.sub(r"(\w)\s*[-–—]\s*(\w)", r"\1-\2", text)  # не трогает наши буллеты
         text = re.sub(r"(?<![\.:!?])\n(?=[А-ЯA-Za-z0-9])", " ", text)
         text = re.sub(r"[ \t]+", " ", text)
         text = re.sub(r"\s+([,.;:!?])", r"\1", text)
