@@ -19,7 +19,7 @@ from utils.docx_writer import (
     save_with_timestamp,
 )
 
-from semantic_segmenter import segment_text_semantic
+from lv_parser import segment_text_semantic
 from ohlp_parser import split_ohlp_sections
 
 
