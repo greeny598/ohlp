@@ -32,11 +32,13 @@ class DocumentLoader:
         auto_detect_type: bool = True,
         doc_type: Optional[DocumentType] = None,
         auto_structure: bool = False,
+        encoding: str = "utf-8"  # ← Добавляем параметр
     ):
         self.file_path = file_path
         self.auto_detect_type = auto_detect_type
         self.override_type = doc_type
         self.auto_structure = auto_structure
+        self.encoding = encoding  # ← Сохраняем кодировку
 
         self.doc_type: DocumentType = "leaflet"
         self.drug_name: str = ""
@@ -215,7 +217,7 @@ class DocumentLoader:
             logger.info("[Текст получен через result.text]")
 
         self._raw_text = raw_text
-        logger.info(f"[Исходный текст]:\n{raw_text[:500]}…")
+        logger.info(f"[Исходный текст]:\n{raw_text[:100]}…")
 
         # 2) определяем тип документа
         if self.override_type:
@@ -244,13 +246,6 @@ class DocumentLoader:
             cleaned = re.sub(r'(?<!\n)(\d+\.)\s*(?=[А-ЯЁ])', r'\n\1 ', cleaned)
             # 3) убрать подряд идущие пустые строки (оставляя по одной)
             cleaned = re.sub(r'\n{2,}', '\n', cleaned).strip()
-
-        # 5) структурируем, если требуется
-        if self.auto_structure and self.doc_type == "leaflet":
-            logger.info("Applying leaflet structure preprocessing…")
-            from .leaflet_structurer import preprocess_leaflet_structure
-            cleaned = preprocess_leaflet_structure(cleaned)
-
 
         self.text = cleaned
         return self.text

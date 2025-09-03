@@ -44,6 +44,11 @@ parser.add_argument(
     "--share", "-s", action="store_true",
     help="Включить публичный шаринг Gradio"
 )
+parser.add_argument(
+    "--n_users", "-n", type=int, default=50,
+    help="Максимальное количество одновременных сессий пользователей"
+)
+
 args = parser.parse_args()
 
 # --- Константы по умолчанию ---
@@ -134,12 +139,11 @@ with gr.Blocks(css=custom_css) as iface:
         fn=on_compare,
         inputs=[test_input, ref_input, rec_input, tmpl_input],
         outputs=output_file,
-        show_progress=True,
-        concurrency_limit=3  # разрешить до 3 параллельных задач для этого события
+        show_progress=True
     )
 
     # Разрешаем нескольким обработчикам выполняться параллельно и ограничиваем длину очереди
-    iface.queue(default_concurrency_limit=3, max_size=10)
+    iface.queue(default_concurrency_limit=args.n_users, max_size=10)
 
 # --- Точка входа ---
 if __name__ == "__main__":
