@@ -1,6 +1,6 @@
 [project]
-name = "ohlp-5"
-version = "0.1.0"
+name = "ohlp"
+version = "0.2.0"
 description = ""
 authors = [
     {name = "Konstantin Gnidko",email = "greeny598@gmail.com"}
@@ -9,7 +9,6 @@ readme = "README.md"
 requires-python = ">=3.12,<4.0"
 dependencies = [
     "gradio (>=5.31.0,<6.0.0)",
-    "pymupdf (>=1.26.0,<2.0.0)",
     "langchain (>=0.3.25,<0.4.0)",
     "langchain-openai (>=0.3.18,<0.4.0)",
     "pydantic (>=2.11.5,<3.0.0)",

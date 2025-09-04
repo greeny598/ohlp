@@ -48,7 +48,7 @@ class SectionChecker:
                 api_key=self.yandexgpt_key,
                 folder_id=self.yandex_cloud_folder_id,
                 modelUri=f"gpt://{self.yandex_cloud_folder_id}/yandexgpt/latest",
-                temperature=0.2,
+                temperature=0.1,
                 maxTokens=2000
             )
         elif api_provider == 'deepseek':
@@ -56,13 +56,13 @@ class SectionChecker:
                 api_key=self.deepseek_key,
                 model='deepseek-chat',
                 base_url='https://api.deepseek.com',
-                temperature=0.2,
+                temperature=0.1,
                 timeout=60.0
             )
         elif api_provider == 'ollama':
             return Ollama(
                 model="gemma3:12b",
-                temperature=0.2
+                temperature=0.1
             )
         else:
             return ChatOpenAI(

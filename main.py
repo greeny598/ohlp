@@ -98,7 +98,7 @@ with gr.Blocks(css=custom_css) as iface:
     with gr.Row():
         test_input = gr.File(
             label="📥 Проверяемая инструкция",
-            file_types=[".pdf", ".docx"],
+            file_types=[".pdf", ".PDF", ".docx", ".DOCX"],
             type="filepath",
             elem_classes="compact-file"
         )
@@ -110,7 +110,7 @@ with gr.Blocks(css=custom_css) as iface:
         )
         rec_input = gr.File(
             label="📑 Рекомендации по заполнению",
-            file_types=[".pdf", ".docx"],
+            file_types=[".pdf", ".PDF", ".docx", ".DOCX"],
             type="filepath",
             elem_classes="compact-file"
         )
