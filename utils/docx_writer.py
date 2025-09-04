@@ -98,17 +98,7 @@ def replace_placeholders_in_doc(doc: Document, replacements: dict):
     """
     Заменяет все ключи из replacements на их значения в документе,
     во всех параграфах — включая таблицы любой вложенности.
-    ВАЖНО: форматирование (12pt, полужирный) применяется ТОЛЬКО,
-    если замена произошла в ячейке таблицы. В тексте вне таблиц
-    исходное форматирование не трогаем.
     """
-    def _in_table(para: Paragraph) -> bool:
-        # параграф находится в ячейке таблицы, если его родитель — w:tc
-        try:
-            return para._p.getparent().tag.endswith('}tc')
-        except Exception:
-            return False
-
     # если есть replacements, подготовим регулярное выражение для поиска ключей
     pattern = None
     if replacements:
@@ -120,17 +110,13 @@ def replace_placeholders_in_doc(doc: Document, replacements: dict):
         if pattern is not None:
             new = pattern.sub(lambda m: replacements[m.group(0)], orig)
             if new != orig:
-                in_table = _in_table(para)
-
                 # пробегаемся по run'ам и правим только те, где есть текст
                 for run in para.runs:
                     run_text = run.text
                     replaced = pattern.sub(lambda m: replacements[m.group(0)], run_text)
                     if replaced != run_text:
                         run.text = replaced
-                        if in_table:
-                            run.font.size = Pt(12)
-                            run.bold = True
+                        run.font.size = Pt(14)
 
                 # если placeholder выпадал между runs и не был пойман,
                 # можно на крайний случай очистить и вставить один run:
@@ -138,20 +124,23 @@ def replace_placeholders_in_doc(doc: Document, replacements: dict):
                     for run in para.runs:
                         run.text = ""
                     new_run = para.add_run(new)
-                    if in_table:
-                        new_run.font.size = Pt(12)
-                        new_run.bold = True
+                    new_run.font.size = Pt(14)
 
         # после замены (или если замен нет) подсветим только целевые подстроки
         # например: <!-- formula-not-decoded --> и <!-- image -->. Для этого
         # проходим по run'ам, разбиваем текст run'а по любому из target-строк
         # и создаём новые run'ы с сохранением форматирования.
+        # список подстрок, требующих подсветки
         targets = ["<!-- formula-not-decoded -->", "<!-- image -->"]
+        # если в абзаце нет ни одной целевой подстроки, ничего делать не нужно
         if any(t in para.text for t in targets):
+            # регулярное выражение, которое выделяет любую из целевых подстрок,
+            # захватывая её в результирующих частях
             pattern_highlight = re.compile("(" + "|".join(re.escape(t) for t in targets) + ")")
             new_fragments = []  # (text, formatting_dict, highlight_flag)
             for run in para.runs:
                 text = run.text
+                # собрать формат run'а
                 fmt = {
                     'bold': run.bold,
                     'italic': run.italic,
@@ -162,6 +151,7 @@ def replace_placeholders_in_doc(doc: Document, replacements: dict):
                     'highlight': run.font.highlight_color
                 }
                 if text:
+                    # разделить текст на части, включая целевые подстроки
                     parts = pattern_highlight.split(text)
                     for part in parts:
                         if not part:
@@ -170,10 +160,13 @@ def replace_placeholders_in_doc(doc: Document, replacements: dict):
                             new_fragments.append((part, fmt, True))
                         else:
                             new_fragments.append((part, fmt, False))
+            # очистить существующие run'ы (оставим пустые, новые добавим в конец)
             for run in para.runs:
                 run.text = ""
+            # добавить новые run'ы с нужным форматированием
             for text, fmt, highlight in new_fragments:
                 new_run = para.add_run(text)
+                # восстановить форматирование
                 new_run.bold = fmt['bold']
                 new_run.italic = fmt['italic']
                 new_run.underline = fmt['underline']
@@ -181,14 +174,59 @@ def replace_placeholders_in_doc(doc: Document, replacements: dict):
                     new_run.font.name = fmt['font_name']
                 if fmt['font_size']:
                     new_run.font.size = fmt['font_size']
+                # если это целевой фрагмент, подкрашиваем
                 if highlight:
                     new_run.font.color.rgb = RGBColor(0, 0, 0)
                     new_run.font.highlight_color = WD_COLOR_INDEX.RED
                 else:
+                    # восстанавливаем цвет, если был задан
                     if fmt['color']:
                         new_run.font.color.rgb = fmt['color']
+                    # восстанавливаем существующую подсветку
                     if fmt['highlight']:
                         new_run.font.highlight_color = fmt['highlight']
+
+
+
+# def _extract_from_header(doc: Document) -> Tuple[str, str]:
+    # import re
+    # # 1) найти параграф с «Листок‑вкладыш»
+    # paras = [p.text.strip() for p in doc.paragraphs]
+    # idx = next(i for i, t in enumerate(paras)
+               # if t.startswith("Листок‑вкладыш"))
+    # # 2) собрать следующие непустые строки до первого пустого
+    # names = []
+    # for line in paras[idx+1:]:
+        # if not line:
+            # break
+        # # отберите только строки с указанием mg
+        # if re.search(r'\d+\s*мг', line):
+            # names.append(line)
+    # # 3) из каждой строки взять часть до первого «,»
+    # drugs = [ln.split(',', 1)[0].strip() for ln in names]
+    # # 4) убрать дубликаты и взять первые две
+    # seen = []
+    # for d in drugs:
+        # if d not in seen:
+            # seen.append(d)
+    # ref = seen[0] if seen else ''
+    # test = seen[1] if len(seen) > 1 else seen[0] if seen else ''
+    # return ref, test
+
+
+# def extract_drug_names(doc: Document, table_index: int = 2) -> Tuple[str, str]:
+    # """
+    # Из таблицы под индексом table_index берёт названия препаратов
+    # в строке 2 (cells[0] и cells[1]), отсекая всё до \n и очищая.
+    # Возвращает (ref_name, test_name).
+    # """
+    # def clean(name: str) -> str:
+        # return re.sub(r'[.,;:!?()\[\]{}«»"\']+$', '', name.strip())
+    # table = doc.tables[table_index]
+    # # первая строка — заголовок, вторая — названия
+    # raw_ref = table.rows[1].cells[0].text.partition('\n')[2]
+    # raw_test = table.rows[1].cells[1].text.partition('\n')[2]
+    # return clean(raw_ref), clean(raw_test)
 
 
 def build_replacements(ref_name: str, test_name: str) -> Dict[str, str]:
