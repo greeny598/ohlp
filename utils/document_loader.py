@@ -131,38 +131,71 @@ class DocumentLoader:
         else:
             return get_docx_converter()
 
+    
+    def _extract_brand_from_line(self, line: str) -> str:
+        """
+        Возвращает только наименование (бренд) из первой строки заголовка,
+        обрезая дозировку/концентрацию/процент и т.п.
+        Логика: идём слева направо и собираем токены, пока не встретим цифры.
+        """
+        # подстраховка: восстановим ®/™ и нормализуем пробелы
+        line = self._restore_trademarks(line or "")
+        line = re.sub(r"\s+", " ", line.strip())
 
+        if not line:
+            return ""
+
+        brand_tokens = []
+        for tok in line.split():
+            # очистим крайние знаки препинания, но оставим внутренние дефисы
+            tok_clean = tok.strip(",.;:()[]{}")
+
+            # отдельный токен с ®/™ — приклеиваем к предыдущему
+            if tok_clean in {"®", "™"}:
+                if brand_tokens:
+                    brand_tokens[-1] = brand_tokens[-1] + " " + tok_clean
+                continue
+
+            # как только встречаем цифры (в т.ч. в склеенном виде "10мг/мл" или "0,25")
+            # — останавливаемся: дальше пошла дозировка/концентрация/процент
+            if re.search(r"\d", tok_clean):
+                break
+
+            brand_tokens.append(tok_clean)
+
+        brand = " ".join(brand_tokens).strip(" ,.;:")
+
+        # Фоллбек: если по какой-то причине ничего не собрали — обрежем по первой запятой
+        if not brand:
+            brand = re.split(r"\s*,\s*", line, maxsplit=1)[0].strip(" ,.;:")
+
+        # финальная нормализация (дефисы/пробелы и т.п.)
+        return self._normalize_drug_name(brand)
+
+    
+    
     def _extract_drug_name_leaflet(self, text: str) -> str:
         """
         Извлекает название препарата из блока между
-        "Листок-вкладыш ..." и "Действующее вещество",
-        затем оставляет только часть до первой запятой.
+        «Листок-вкладыш … информация для пациента» и «Действующее вещество».
+        Возвращает только наименование (без дозировки, формы и т.п.).
         """
         try:
-            # Ищем блок между заголовком листка-вкладыша и строкой "Действующее вещество"
             pattern = re.compile(
                 r"(?:Листок[-\s]*вкладыш.*?\n)(.*?)(?=\n\s*Действующее\s+вещество\s*:?)",
                 re.IGNORECASE | re.DOTALL,
             )
-            match = pattern.search(text)
-            if not match:
+            m = pattern.search(text)
+            if not m:
                 return ""
-            block = match.group(1).strip()
 
-            # Берём первую непустую строку — в ней обычно и лежит полное наименование
+            block = (m.group(1) or "").strip()
             first_line = next((ln.strip() for ln in block.splitlines() if ln.strip()), "")
 
             if not first_line:
                 return ""
 
-            # Обрезаем до первой запятой
-            head = re.split(r"\s*,\s*", first_line, maxsplit=1)[0]
-
-            # Убираем хвостовые точки/двоеточия/точки с запятой, но сохраняем ®/™ и т.п.
-            head = re.sub(r"[.,;:]+$", "", head).strip()
-
-            # Нормализуем пробелы/дефисы/маркеры (используем имеющийся метод)
-            return self._normalize_drug_name(head)
+            return self._extract_brand_from_line(first_line)
 
         except Exception as e:
             logger.warning(f"[Ошибка при извлечении названия препарата из leaflet]: {e}")
@@ -172,33 +205,25 @@ class DocumentLoader:
     def _extract_drug_name_ohlp(self, text: str) -> str:
         """
         Извлекает название препарата из ОХЛП между пунктами:
-        1. НАИМЕНОВАНИЕ ... и 2. КАЧЕСТВЕННЫЙ И КОЛИЧЕСТВЕННЫЙ СОСТАВ,
-        затем оставляет только часть до первой запятой.
+        1. НАИМЕНОВАНИЕ ... и 2. КАЧЕСТВЕННЫЙ И КОЛИЧЕСТВЕННЫЙ СОСТАВ.
+        Возвращает только наименование (без дозировки, формы и т.п.).
         """
         try:
             pattern = re.compile(
-                r"1\.\s*НАИМЕНОВАНИЕ ЛЕКАРСТВЕННОГО ПРЕПАРАТА\s*(.*?)\s*2\.\s*КАЧЕСТВЕННЫЙ И КОЛИЧЕСТВЕННЫЙ СОСТАВ",
+                r"1\.\s*НАИМЕНОВАНИЕ\s+ЛЕКАРСТВЕННОГО\s+ПРЕПАРАТА\s*(.*?)\s*2\.\s*КАЧЕСТВЕННЫЙ\s+И\s+КОЛИЧЕСТВЕННЫЙ\s+СОСТАВ",
                 re.IGNORECASE | re.DOTALL,
             )
-            match = pattern.search(text)
-            if not match:
+            m = pattern.search(text)
+            if not m:
                 return ""
 
-            block = match.group(1).strip()
-
-            # Берём первую непустую строку
+            block = (m.group(1) or "").strip()
             first_line = next((ln.strip() for ln in block.splitlines() if ln.strip()), "")
 
             if not first_line:
                 return ""
 
-            # Обрезаем до первой запятой
-            head = re.split(r"\s*,\s*", first_line, maxsplit=1)[0]
-
-            # Убираем хвостовые точки/двоеточия/точки с запятой, но сохраняем ®/™ и т.п.
-            head = re.sub(r"[.,;:]+$", "", head).strip()
-
-            return self._normalize_drug_name(head)
+            return self._extract_brand_from_line(first_line)
 
         except Exception as e:
             logger.warning(f"[Ошибка при извлечении названия препарата из ОХЛП]: {e}")
@@ -237,9 +262,31 @@ class DocumentLoader:
         text = re.sub(r"(?m)^" + re.escape(bullet) + r"[ \t]+" + re.escape(bullet) + r"[ \t]+", bullet + " ", text)
 
         return text
+        
+    def _restore_trademarks(self, text: str) -> str:
+        """
+        Восстанавливает знаки товарных марок, если конвертер превратил их в '0'
+        или похожие кружки. Правила не трогают дроби/градусы.
+        """
+        # 1) Явные текстовые формы → символы
+        text = re.sub(r"\(\s*[Rr]\s*\)", "®", text)
+        text = re.sub(r"\(\s*T[Mm]\s*\)", "™", text)
+
+        # 2) Одиночные маркеры после слова-бренда → ®
+        #    - перед символом: слово, начинающееся с буквы (лат/кирилл), длиной ≥2
+        #    - символ: 0 или варианты кружков/градусов
+        #    - после символа НЕ должно идти число (в т.ч. через . или ,), и НЕ должно быть C/С (Цельсий)
+        trademark_like = r"(?:0|°|º|˚|○)"
+        pattern = re.compile(
+            rf"(\b[A-Za-zА-Яа-яЁё][\w\-]{{1,}})\s*{trademark_like}\b(?!\s*\d|\s*[.,]\s*\d| *[CcСс])"
+        )
+        text = re.sub(pattern, r"\1 ®", text)
+
+        return text
     
     def _clean_common(self, text: str) -> str:
         text = html.unescape(text)
+        text = self._restore_trademarks(text)
 
         # 1) Сначала нормализуем маркеры и оставляем их в тексте
         text = self._normalize_bullets_keep(text, style="dot")  # или "dash"
@@ -308,6 +355,8 @@ class DocumentLoader:
             raw_text = getattr(result, "text", "") or ""
             logger.info("[Текст получен через result.text]")
 
+        raw_text = unicodedata.normalize("NFKC", raw_text).replace("\u00A0", " ")
+        raw_text = self._restore_trademarks(raw_text)
         self._raw_text = raw_text
         logger.info(f"[Исходный текст]:\n{raw_text[:100]}…")
 
@@ -346,6 +395,7 @@ class DocumentLoader:
         """
         Удаляет лишние переносы строк, дефисы в начале строки, спецсимволы и пробелы внутри названия препарата
         """
+        text = self._restore_trademarks(text)            # подстраховка
         text = re.sub(r"\n{2,}", "\n", text)             # двойные переводы строк → один
         text = re.sub(r"\s*\n\s*", " ", text)            # убираем переносы внутри названия
         text = re.sub(r"^-+", "", text.strip())          # дефисы в начале строки
