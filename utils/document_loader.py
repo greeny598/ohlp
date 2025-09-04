@@ -47,57 +47,133 @@ class DocumentLoader:
         self._doc = None
 
     @staticmethod
-    def detect_document_type(text: str) -> DocumentType:
+    def detect_document_type(text: str) -> Literal["leaflet", "ohlp"]:
         """
-        По ключевым заголовкам решает, что перед нами:
-        — ohlp (OHLP)
-        — leaflet (листок-вкладыш)
+        Надёжное определение типа документа по уникальным заголовкам/структурам.
+
+        Листок-вкладыш (leaflet): 
+          • "Листок-вкладыш … информация для пациента" и/или 
+          • "Содержание листка-вкладыша" и/или 
+          • >=3 из разделов 1–6 для пациента:
+            1. Что из себя представляет … и для чего его применяют
+            2. О чём следует знать …
+            3. Применение/Как принимать
+            4. Возможные нежелательные реакции
+            5. Хранение (препарата)
+            6. Содержимое упаковки и прочие сведения
+
+        ОХЛП (ohlp):
+          • "ОБЩАЯ ХАРАКТЕРИСТИКА ЛЕКАРСТВЕННОГО ПРЕПАРАТА" И 
+          • наличие разделов "1. НАИМЕНОВАНИЕ …" и "2. КАЧЕСТВЕННЫЙ И КОЛИЧЕСТВЕННЫЙ СОСТАВ"
+            (или ≥3 характерных раздела 1–6, включая 1 и 2).
         """
-        ohlp_patterns = [
-            r"ОБЩАЯ\s+ХАРАКТЕРИСТИКА\s+ЛЕКАРСТВЕННОГО\s+ПРЕПАРАТА",
-            r"КЛИНИЧЕСКИЕ\s+ДАННЫЕ",
-            r"ФАРМАКОЛОГИЧЕСКИЕ\s+СВОЙСТВА",
-            r"ДЕРЖАТЕЛЬ\s+РЕГИСТРАЦИОННОГО\s+УДОСТОВЕРЕНИЯ",
+
+        # Нормализация
+        t = unicodedata.normalize("NFKC", text or "")
+        t = t.replace("\u00A0", " ")
+        tl = t.lower()
+        dash = r"[\-\u2010\u2011\u2012\u2013\u2014\u2212\u2043]"
+
+        # --- LEAFLET: заголовки/оглавление ---
+        lv_heading = re.search(
+            rf"листок{dash}?\s*вкладыш.*?информация\s+для\s+пациента", tl, re.DOTALL
+        )
+        lv_contents = re.search(
+            rf"содержание\s+листка{dash}?\s*вкладыша", tl
+        )
+
+        # LEAFLET: типовая 1–6 структура (допускаем вариации формулировок)
+        lv_sections_patterns = [
+            r"\b1\.\s*(что\s+(?:из\s+себя\s+представляет|такое).{0,120}?и\s+для\s+чего\s+его\s+применя[юе]т)",
+            r"\b2\.\s*(о\s*ч[её]м\s+следует\s+знать|что\s+нужно\s+знать)",
+            r"\b3\.\s*(применени[ея]|как\s+принима[тьте]|как\s+использовать)",
+            r"\b4\.\s*возможн[ыо]е?\s+нежелательн[ыо]е?\s+реакц",
+            r"\b5\.\s*хранени[ея](?:\s+препарата)?",
+            r"\b6\.\s*содержим[оа]е\s+упаковк[иы].*?проч[иы]е?\s+сведен",
         ]
-        leaflet_patterns = [
-            r"Листок[-\s]*вкладыш\s*–?\s*информация",
-            r"Что\s+из\s+себя\s+представляет\s+препарат",
-            r"Содержимое\s+упаковки",
-        ]
-        ohlp_score = sum(bool(re.search(p, text, re.IGNORECASE))
-                         for p in ohlp_patterns)
-        leaflet_score = sum(bool(re.search(p, text, re.IGNORECASE))
-                            for p in leaflet_patterns)
-        return "ohlp" if ohlp_score >= leaflet_score else "leaflet"
+        lv_sections_found = sum(bool(re.search(p, tl, re.DOTALL)) for p in lv_sections_patterns)
+
+        # --- OHLP: «шапка» и нумерованные разделы 1–6 ---
+        o_head = re.search(r"\bобщая\s+характеристика\s+лекарственн[оы]го\s+препарат[аи]\b", tl)
+        o_s1 = re.search(r"\b1\.\s*наименовани[ея]\s+лекарственн[оы]го\s+препарат[аи]\b", tl)
+        o_s2 = re.search(r"\b2\.\s*качественн[ыий]\s+и\s+количественн[ыий]\s+состав\b", tl)
+        o_s3 = re.search(r"\b3\.\s*лекарственн[аояы]\s+форма\b", tl)
+        o_s4 = re.search(r"\b4\.\s*клиническ[иеих]\s+данн[ыеых]\b", tl)
+        o_s5 = re.search(r"\b5\.\s*фармакологическ[иеих]\s+свойств[ао]\b", tl)
+        o_s6 = re.search(r"\b6\.\s*фармацевтическ[иеих]\s+свойств[ао]\b", tl)
+        ohlp_sections_found = sum(bool(x) for x in (o_s1, o_s2, o_s3, o_s4, o_s5, o_s6))
+
+        # --- Решение (жёсткие правила → потом мягкий скоринг) ---
+        # 1) Явные признаки листка-вкладыша
+        if lv_heading or lv_contents or lv_sections_found >= 3:
+            return "leaflet"
+
+        # 2) Явные признаки ОХЛП
+        if (o_head and o_s1 and o_s2) or (o_s1 and o_s2 and ohlp_sections_found >= 3):
+            return "ohlp"
+
+        # 3) Тай-брейк: если упомянут «листок-вкладыш», предпочитаем leaflet
+        if re.search(rf"листок{dash}?\s*вкладыш", tl):
+            return "leaflet"
+
+        # 4) Мягкий скоринг (без «держателя РУ», т.к. встречается в обоих типах)
+        lv_score = (1 if lv_heading else 0) + (1 if lv_contents else 0) + min(lv_sections_found, 3)
+        ohlp_score = (1 if o_head else 0) + (2 if (o_s1 and o_s2) else 0) + min(ohlp_sections_found, 3)
+
+        return "leaflet" if lv_score >= ohlp_score else "ohlp"
+
 
     def _get_converter(self):
         """Return a cached Docling converter based on file extension."""
         ext = Path(self.file_path).suffix.lower()
-        return get_pdf_converter() if ext == ".pdf" else get_docx_converter()
+        if ext == ".pdf":
+            return get_pdf_converter() 
+        else:
+            return get_docx_converter()
+
 
     def _extract_drug_name_leaflet(self, text: str) -> str:
         """
-        Извлекает название препарата из блока между 
-        "листок-вкладыш" и "действующее вещество"
+        Извлекает название препарата из блока между
+        "Листок-вкладыш ..." и "Действующее вещество",
+        затем оставляет только часть до первой запятой.
         """
         try:
+            # Ищем блок между заголовком листка-вкладыша и строкой "Действующее вещество"
             pattern = re.compile(
-                r"(?:Листок[-\s]*вкладыш.*?\n)(.*?)(?=\n\s*Действующее вещество[:\s])",
+                r"(?:Листок[-\s]*вкладыш.*?\n)(.*?)(?=\n\s*Действующее\s+вещество\s*:?)",
                 re.IGNORECASE | re.DOTALL,
             )
             match = pattern.search(text)
-            if match:
-                block = match.group(1).strip()
-                return self._normalize_drug_name(block)
+            if not match:
+                return ""
+            block = match.group(1).strip()
+
+            # Берём первую непустую строку — в ней обычно и лежит полное наименование
+            first_line = next((ln.strip() for ln in block.splitlines() if ln.strip()), "")
+
+            if not first_line:
+                return ""
+
+            # Обрезаем до первой запятой
+            head = re.split(r"\s*,\s*", first_line, maxsplit=1)[0]
+
+            # Убираем хвостовые точки/двоеточия/точки с запятой, но сохраняем ®/™ и т.п.
+            head = re.sub(r"[.,;:]+$", "", head).strip()
+
+            # Нормализуем пробелы/дефисы/маркеры (используем имеющийся метод)
+            return self._normalize_drug_name(head)
+
         except Exception as e:
-            logger.warning(
-                f"[Ошибка при извлечении названия препарата из leaflet]: {e}")
-        return ""
+            logger.warning(f"[Ошибка при извлечении названия препарата из leaflet]: {e}")
+            return ""
+
 
     def _extract_drug_name_ohlp(self, text: str) -> str:
         """
         Извлекает название препарата из ОХЛП между пунктами:
-        1. НАИМЕНОВАНИЕ ... и 2. КАЧЕСТВЕННЫЙ И КОЛИЧЕСТВЕННЫЙ СОСТАВ
+        1. НАИМЕНОВАНИЕ ... и 2. КАЧЕСТВЕННЫЙ И КОЛИЧЕСТВЕННЫЙ СОСТАВ,
+        затем оставляет только часть до первой запятой.
         """
         try:
             pattern = re.compile(
@@ -105,13 +181,29 @@ class DocumentLoader:
                 re.IGNORECASE | re.DOTALL,
             )
             match = pattern.search(text)
-            if match:
-                name = match.group(1).strip()
-                return self._normalize_drug_name(name)
+            if not match:
+                return ""
+
+            block = match.group(1).strip()
+
+            # Берём первую непустую строку
+            first_line = next((ln.strip() for ln in block.splitlines() if ln.strip()), "")
+
+            if not first_line:
+                return ""
+
+            # Обрезаем до первой запятой
+            head = re.split(r"\s*,\s*", first_line, maxsplit=1)[0]
+
+            # Убираем хвостовые точки/двоеточия/точки с запятой, но сохраняем ®/™ и т.п.
+            head = re.sub(r"[.,;:]+$", "", head).strip()
+
+            return self._normalize_drug_name(head)
+
         except Exception as e:
-            logger.warning(
-                f"[Ошибка при извлечении названия препарата из ОХЛП]: {e}")
-        return ""
+            logger.warning(f"[Ошибка при извлечении названия препарата из ОХЛП]: {e}")
+            return ""
+
     
     def _normalize_bullets_keep(self, text: str, style: str = "dot") -> str:
         """
@@ -252,12 +344,14 @@ class DocumentLoader:
     
     def _normalize_drug_name(self, text: str) -> str:
         """
-        Удаляет лишние переносы строк, спецсимволы и пробелы внутри названия препарата
+        Удаляет лишние переносы строк, дефисы в начале строки, спецсимволы и пробелы внутри названия препарата
         """
-        text = re.sub(r"\n{2,}", "\n", text)                  # двойные переводы строк → один
-        text = re.sub(r"[#–—•▪]", "", text)                   # убираем спецсимволы
-        text = re.sub(r"\s*-\s*", "-", text)                  # пробелы вокруг дефисов
-        text = re.sub(r"[ \t]+", " ", text)                   # множественные пробелы
+        text = re.sub(r"\n{2,}", "\n", text)             # двойные переводы строк → один
+        text = re.sub(r"\s*\n\s*", " ", text)            # убираем переносы внутри названия
+        text = re.sub(r"^-+", "", text.strip())          # дефисы в начале строки
+        text = re.sub(r"[#–—•▪]", "", text)              # убираем спецсимволы
+        text = re.sub(r"\s*-\s*", "-", text)             # пробелы вокруг дефисов
+        text = re.sub(r"[ \t]+", " ", text)              # множественные пробелы
         return text.strip()
 
     def simple_load(self) -> str:
