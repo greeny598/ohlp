@@ -61,6 +61,28 @@ def compute_section_positions(text: str, sections_raw: List[str], threshold: int
 
     return starts, ends
 
+def extract_sections_from_recommendations(text: str) -> list[str]:
+    """
+    Возвращает список заголовков разделов из markdown‑текста рекомендаций.
+    Предполагается, что рекомендации размечены маркерами %split%.
+    """
+    sections = []
+    parts = text.split('%split%')
+    # между %split% находятся блоки, в каждом первый непустой заголовок
+    blocks = parts[1:-1] if len(parts) > 2 else []
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+        lines = block.splitlines()
+        # берем первую непустую строку как заголовок
+        title_line = next((ln for ln in lines if ln.strip()), '')
+        # удаляем markdown и лишние пробелы
+        title_clean = re.sub(r"^[#>\-*+]+\s*", "", title_line).strip()
+        if title_clean:
+            sections.append(title_clean)
+    return sections
+
 
 def split_recommendations(text: str, sections: List[str],
                           threshold: int = 90) -> Dict[str, str]:
