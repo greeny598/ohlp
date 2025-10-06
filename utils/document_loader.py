@@ -361,10 +361,36 @@ class DocumentLoader:
         logger.info(f"[Исходный текст]:\n{raw_text[:100]}…")
 
         # 2) определяем тип документа
+        # применяем жёсткие эвристики: имя файла и первая строка
         if self.override_type:
             self.doc_type = self.override_type
         elif self.auto_detect_type:
-            self.doc_type = self.detect_document_type(raw_text)
+            try:
+                from difflib import SequenceMatcher
+                # имя файла без пути и расширения
+                file_name_lower = Path(self.file_path).stem.lower()
+                # если в имени содержится ohlp/охлп → считаем OHLP
+                if ('ohlp' in file_name_lower) or ('охлп' in file_name_lower):
+                    self.doc_type = 'ohlp'
+                else:
+                    # первая непустая строка текста
+                    first_line = next((ln.strip() for ln in raw_text.splitlines() if ln.strip()), '').lower()
+                    target = 'общая характеристика лекарственного препарата'
+                    if first_line:
+                        ratio = SequenceMatcher(None, first_line, target).ratio()
+                        # если похожа на заголовок ОХЛП → OHLP
+                        if ratio >= 0.8:
+                            self.doc_type = 'ohlp'
+                        # явный листок-вкладыш
+                        elif first_line.startswith('листок-вкладыш') and ('информация для пациента' in first_line):
+                            self.doc_type = 'leaflet'
+                        else:
+                            self.doc_type = self.detect_document_type(raw_text)
+                    else:
+                        self.doc_type = self.detect_document_type(raw_text)
+            except Exception:
+                # fallback на старый детектор
+                self.doc_type = self.detect_document_type(raw_text)
         else:
             self.doc_type = "leaflet"
         logger.info(f"Detected document type: {self.doc_type}")
