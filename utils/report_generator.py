@@ -3,6 +3,7 @@ import logging
 import traceback
 import asyncio
 import inspect
+import re
 from difflib import get_close_matches
 from docx import Document
 
@@ -10,7 +11,6 @@ from utils.document_loader import DocumentLoader
 from threading import Lock
 from langchain_utils.section_checker import SectionChecker
 from utils.parsers import split_recommendations
-import re
 
 from utils.docx_writer import (
     build_replacements,
@@ -19,6 +19,64 @@ from utils.docx_writer import (
     fill_comparison_table,
     save_with_timestamp,
 )
+
+
+def _clean_section_name(s: str) -> str:
+    """
+    Очищает строку: убирает пробелы, звёздочки, кавычки и пр. мусор,
+    но сохраняет <...> и, при необходимости, восстанавливает недостающую '<'.
+    """
+    if not s:
+        return ""
+    # нормализуем пробелы и убираем звёздочки где угодно
+    s = s.replace("\u00A0", " ")
+    s = re.sub(r'\*+', '', s)
+    s = re.sub(r'\s+', ' ', s)
+
+    # срезаем мусор по краям, НО не < и >
+    s = re.sub(r'^[\s\.\-–—«»"\'№]+', '', s)
+    s = re.sub(r'[\s\.\-–—«»"\'№]+$', '', s)
+
+    # если строка заканчивается на '>' без начального '<' — добавим '<'
+    if s.endswith('>') and not s.startswith('<'):
+        s = '<' + s
+    # если строка начинается на '<', но внутри нет закрывающей '>' — добавим её
+    if s.startswith('<') and '>' not in s[1:]:
+        s = s + '>'
+
+    return s.strip()
+
+
+def extract_sections_from_recommendations(text: str) -> list[str]:
+    """
+    Разбивает текст рекомендаций по маркеру %split% и возвращает список
+    заголовков (первая непустая строка каждого блока), очищенных от
+    спецсимволов. Пропускает служебные секции и маркер %extra%.
+    """
+    parts = re.split(r'%\s*split\s*%', text or '', flags=re.IGNORECASE)
+    sections: list[str] = []
+    for part in parts:
+        block = (part or '').strip()
+        if not block:
+            continue
+        # пропускаем длинное вступление
+        if block.lower().startswith('рекомендации по составлению проекта общей характеристики'):
+            continue
+        if block.strip().lower() == '%extra%':
+            continue
+        # первая непустая строка блока
+        lines = block.splitlines()
+        first = ''
+        for ln in lines:
+            if ln.strip():
+                first = ln.strip()
+                break
+        if not first:
+            continue
+        clean = _clean_section_name(first)
+        if clean:
+            sections.append(clean)
+    return sections
 
 from lv_parser import segment_text_semantic
 from ohlp_parser import split_ohlp_sections
@@ -40,42 +98,6 @@ def load_cached_recommendations(rec_path: str):
             logger.info("Загружаем рекомендации в кэш")
     logger.info("Используем кэшированный файл рекомендаций")
     return _recommendation_cache[rec_path]
-
-# === Helper: извлекаем заголовки разделов из текста рекомендаций ===
-# Функции для очистки спецсимволов и получения списка разделов
-SECTION_LEAD_TRASH = r'^[\s\*<>"«»№\.\-–—\u00A0]+'
-SECTION_TAIL_TRASH = r'[\s\*<>"«»\.\-–—\u00A0]+$'
-
-def _clean_section_name(s: str) -> str:
-    s = s or ''
-    s = re.sub(SECTION_LEAD_TRASH, '', s.strip())
-    s = re.sub(SECTION_TAIL_TRASH, '', s)
-    return s.strip()
-
-def extract_sections_from_recommendations(text: str) -> list:
-    """
-    Разбивает текст рекомендаций по маркеру %split% и возвращает
-    список заголовков разделов. Очищает лишние спецсимволы в начале и конце строк.
-    """
-    parts = re.split(r'%\s*split\s*%', text, flags=re.IGNORECASE)
-    sections: list[str] = []
-    for part in parts:
-        block = (part or '').strip()
-        if not block:
-            continue
-        # исключаем длинное предисловие и служебные хвосты
-        if block.lower().startswith('рекомендации по составлению проекта общей характеристики'):
-            continue
-        if block.strip().lower() == '%extra%':
-            continue
-        for ln in block.splitlines():
-            ln = ln.strip()
-            if ln:
-                clean = _clean_section_name(ln)
-                if clean:
-                    sections.append(clean)
-                break
-    return sections
 
 
 def generate_report(
@@ -123,21 +145,19 @@ def generate_report(
             f"2) Инициализация SectionChecker с провайдером: {provider}")
         checker = SectionChecker(api_provider=provider)
 
-        # 3) Извлечение списка разделов из файла рекомендаций и загрузка шаблона
+        # 3) Извлечение списка разделов из рекомендаций
         logger.info("3) Извлечение списка разделов из файла рекомендаций…")
         sections = extract_sections_from_recommendations(rec_text)
-        logger.info(f"  → {len(sections)} разделов (из рекомендаций): {sections}")
-        # Загрузка шаблона отчёта
+        logger.info(f"   → {len(sections)} разделов (из рекомендаций): {sections}")
+        # 4) Загрузка шаблона
+        logger.info("4) Загрузка шаблона…")
         template_path = os.path.join(template_dir, template_name)
         if not os.path.exists(template_path):
             raise FileNotFoundError(f"Шаблон не найден: {template_path}")
         doc = Document(template_path)
-        # Предупреждаем, если в шаблоне мало таблиц
-        if len(doc.tables) < 3:
-            logger.warning("В шаблоне недостаточно таблиц; некоторые данные могут быть отображены некорректно")
 
-        # 4) Разбиение на секции
-        logger.info("4) Разбиение текстов по разделам…")
+        # 5) Разбиение на секции
+        logger.info("5) Разбиение текстов по разделам…")
         if loader_test.doc_type == "leaflet":
           test_blocks = segment_text_semantic(test_text, sections)
           ref_blocks = segment_text_semantic(ref_text, sections)
@@ -270,17 +290,16 @@ async def generate_report_async(
         logger.info(f"2) [async] Инициализация SectionChecker с провайдером: {provider}")
         checker = SectionChecker(api_provider=provider)
 
-        # 3) [async] Извлечение списка разделов из файла рекомендаций и загрузка шаблона
+        # 3) [async] Извлечение списка разделов из файла рекомендаций
         logger.info("3) [async] Извлечение списка разделов из файла рекомендаций…")
-        sections = extract_sections_from_recommendations(rec_text)
-        logger.info(f"  → {len(sections)} разделов (из рекомендаций): {sections}")
-        # Загрузка шаблона отчёта
+        sections = await asyncio.to_thread(extract_sections_from_recommendations, rec_text)
+        logger.info(f"   → {len(sections)} разделов (из рекомендаций): {sections}")
+        # 4) [async] Загрузка шаблона
+        logger.info("4) [async] Загрузка шаблона…")
         template_path = os.path.join(template_dir, template_name)
         if not os.path.exists(template_path):
             raise FileNotFoundError(f"Шаблон не найден: {template_path}")
         doc = Document(template_path)
-        if len(doc.tables) < 3:
-            logger.warning("[async] В шаблоне недостаточно таблиц; некоторые данные могут быть отображены некорректно")
 
         # 4) Разбиение на секции (параллельно в пуле потоков)
         logger.info("4) [async] Разбиение текстов по разделам…")

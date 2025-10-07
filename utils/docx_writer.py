@@ -11,47 +11,6 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.text import WD_COLOR_INDEX
 from docx.shared import RGBColor
 from difflib import SequenceMatcher
-import re
-
-# Паттерны для очистки названий разделов от ведущих и завершающих спецсимволов
-SECTION_LEAD_TRASH = r'^[\s\*<>"«»№\.\-–—\u00A0]+'
-SECTION_TAIL_TRASH = r'[\s\*<>"«»\.\-–—\u00A0]+$'
-
-def _clean_section_name(s: str) -> str:
-    """
-    Очищает строку: убирает ведущие и завершающие пробелы, звёздочки,
-    кавычки, дефисы и прочие спецсимволы.
-    """
-    s = s or ""
-    s = re.sub(SECTION_LEAD_TRASH, '', s.strip())
-    s = re.sub(SECTION_TAIL_TRASH, '', s)
-    return s.strip()
-
-def _first_non_empty_line(text: str) -> str:
-    """
-    Возвращает первую непустую строку текста.
-    """
-    for ln in (text or '').splitlines():
-        if ln.strip():
-            return ln.strip()
-    return ''
-
-def _write_fragments(paragraph, frags, default_size_pt=12):
-    """
-    Записывает список фрагментов в параграф, сохраняя размеры шрифта и цвет.
-    frags: список кортежей (тип, текст, (r,g,b)?).
-    """
-    # очистим существующие run'ы
-    for r in paragraph.runs:
-        r.text = ''
-    for kind, txt, *color in frags:
-        if not txt:
-            continue
-        run = paragraph.add_run(txt)
-        run.font.size = Pt(default_size_pt)
-        if kind == 'highlight' and color:
-            r, g, b = color[0]
-            run.font.color.rgb = RGBColor(r, g, b)
 
 
 def iter_paragraphs(element) -> List[Paragraph]:
@@ -244,21 +203,93 @@ def build_replacements(ref_name: str, test_name: str) -> Dict[str, str]:
     }
 
 
+# --- вспомогательные функции для таблицы сравнения ---
+def _clean_section_name(s: str) -> str:
+    """
+    Очищает строку: убирает ведущие и завершающие пробелы, звёздочки,
+    кавычки, дефисы и прочие спецсимволы. Используется для названий разделов.
+    """
+    if not s:
+        return ""
+    # символы в начале
+    s = re.sub(r'^[\s\*<>"«»№\.\-–—\u00A0]+', '', s.strip())
+    # символы в конце
+    s = re.sub(r'[\s\*<>"«»\.\-–—\u00A0]+$', '', s)
+    return s.strip()
+
+
+def _first_non_empty_line(text: str) -> str:
+    """
+    Возвращает первую непустую строку текста.
+    """
+    for ln in (text or '').splitlines():
+        if ln.strip():
+            return ln.strip()
+    return ''
+
+
+def _remove_first_line(text: str) -> str:
+    """
+    Возвращает текст без первой непустой строки (используется, чтобы
+    убрать заголовок раздела из текста и не дублировать его в таблице).
+    """
+    if not text:
+        return ""
+    lines = text.splitlines()
+    found = False
+    new_lines: List[str] = []
+    for ln in lines:
+        if not found and ln.strip():
+            found = True
+            continue
+        new_lines.append(ln)
+    return "\n".join(new_lines).lstrip()
+
+
+def _write_fragments(paragraph, frags: List[Tuple[str, str, Tuple[int, int, int]]], default_size_pt: int = 12) -> None:
+    """
+    Записывает список фрагментов (тип, текст, (r,g,b)) в параграф.
+    typ может быть 'plain' или 'highlight'.
+    Цвет применяется только для 'highlight'. Шрифт устанавливается стандартным
+    размером и не выделяется полужирным.
+    """
+    # удалить существующие run'ы
+    for run in paragraph.runs:
+        run.text = ''
+    for item in frags:
+        if not item:
+            continue
+        kind = item[0]
+        txt = item[1]
+        color = item[2] if len(item) > 2 else None
+        if not txt:
+            continue
+        run = paragraph.add_run(txt)
+        run.font.size = Pt(default_size_pt)
+        # не выделяем текст тела жирным
+        run.bold = False
+        if kind == 'highlight' and color:
+            r, g, b = color
+            run.font.color.rgb = RGBColor(r, g, b)
+
+
 def fill_comparison_table(doc: Document,
                           data: List[Dict[str, Any]],
                           table_index: int = 2) -> None:
     """
-    Заполняет таблицу сравнения в отчёте. Создаёт по две строки на каждый раздел:
+    Заполняет таблицу сравнения данными data. Для каждого entry формируется три строки:
 
-      1) Заголовок раздела: объединяем две первые ячейки и помещаем очищенное название
-         раздела по центру. Если у таблицы есть третий столбец, его оставляем пустым.
+      1. Первая строка: содержит эталонное название раздела (из рекомендаций). Все
+         ячейки строки объединяются, текст центрируется и выделяется полужирным.
+      2. Вторая строка: содержит названия разделов, извлечённые из референтной и
+         анализируемой инструкций. Названия выводятся полужирным в своих столбцах.
+         Если у таблицы есть третий столбец, он оставляется пустым.
+      3. Третья строка: содержит текст логических блоков для референтного и
+         анализируемого документов. Различия подсвечиваются (зелёный —
+         референт, красный — анализируемый). Текст не выделяется полужирным.
 
-      2) Содержимое раздела: левая колонка — референтный документ, правая колонка —
-         анализируемый документ. Названия разделов выводятся жирным шрифтом, затем текст.
-         Различия подсвечиваются: в референте — зелёным, в анализируемом — красным.
-
-      Если в данных присутствует ключ "Отличия" и таблица имеет третью колонку, она
-      заполняется текстом из этого поля.
+      Если в entry присутствует ключ "Отличия" и таблица имеет третий столбец,
+      этот текст помещается в третий столбец третьей строки.
     """
     table = doc.tables[table_index]
     # очищаем таблицу, оставляя только первую строку (шапку)
@@ -267,65 +298,72 @@ def fill_comparison_table(doc: Document,
         tbl.remove(tbl.tr_lst[-1])
 
     for entry in data:
-        # Эталонное название из рекомендаций
-        canonical_title_raw = entry.get('Раздел', '') or ''
-        canonical_title = _clean_section_name(canonical_title_raw)
-
-        # Содержимое по разделам
+        canonical_raw = entry.get('Раздел', '') or ''
+        canonical_title = _clean_section_name(canonical_raw)
         ref_content = entry.get('Содержимое референтного документа', '') or ''
         test_content = entry.get('Содержимое тестируемого документа', '') or ''
 
-        # названия разделов из текстов
+        # извлекаем названия разделов из документов и очищаем их
         ref_name = _clean_section_name(_first_non_empty_line(ref_content))
         test_name = _clean_section_name(_first_non_empty_line(test_content))
 
-        # тело без первой строки (чтобы не дублировать заголовок)
-        ref_body = '\n'.join(ref_content.splitlines()[1:]) if ref_content else ''
-        test_body = '\n'.join(test_content.splitlines()[1:]) if test_content else ''
+        # убираем первую строку из содержимого (чтобы не дублировать в теле)
+        ref_body = _remove_first_line(ref_content)
+        test_body = _remove_first_line(test_content)
 
-        # подсветка различий (зелёный — ref, красный — test)
+        # подготовим фрагменты для подсветки различий
         ref_frags, test_frags = highlight_differences(ref_body, test_body)
 
-        # ——— Строка заголовка ———
-        heading_row = table.add_row()
-        # объединяем первые две колонки, если они есть
-        merged_heading = heading_row.cells[0]
-        if len(heading_row.cells) > 1:
-            merged_heading = merged_heading.merge(heading_row.cells[1])
-        merged_heading.text = ''
-        p_head = merged_heading.paragraphs[0]
-        run = p_head.add_run(canonical_title or '—')
+        # 1) строка с эталонным названием (объединяем все ячейки)
+        header_row = table.add_row()
+        # начальная ячейка
+        merged_cell = header_row.cells[0]
+        # если больше одной ячейки — объединяем их
+        for idx in range(1, len(header_row.cells)):
+            merged_cell = merged_cell.merge(header_row.cells[idx])
+        merged_cell.text = ''
+        p = merged_cell.paragraphs[0]
+        run = p.add_run(canonical_title or '—')
         run.bold = True
         run.font.size = Pt(12)
-        p_head.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-        # если таблица имеет третий столбец, он остаётся пустым
+        # 2) строка с названиями из инструкций
+        name_row = table.add_row()
+        # заполняем первую и вторую ячейки названиями (полужирный)
+        if len(name_row.cells) > 0:
+            cell_ref_name = name_row.cells[0]
+            cell_ref_name.text = ''
+            p_rn = cell_ref_name.paragraphs[0]
+            run_r = p_rn.add_run(ref_name or '')
+            run_r.bold = True
+            run_r.font.size = Pt(12)
+        if len(name_row.cells) > 1:
+            cell_test_name = name_row.cells[1]
+            cell_test_name.text = ''
+            p_tn = cell_test_name.paragraphs[0]
+            run_t = p_tn.add_run(test_name or '')
+            run_t.bold = True
+            run_t.font.size = Pt(12)
+        # оставшиеся ячейки (например, третью) оставляем пустыми
 
-        # ——— Строка содержимого ———
-        content_row = table.add_row()
-        # левая колонка: референт
-        cell_ref = content_row.cells[0]
-        # название раздела (жирным)
-        para_ref_name = cell_ref.paragraphs[0]
-        para_ref_name.text = ''
-        run_ref_name = para_ref_name.add_run(ref_name)
-        run_ref_name.bold = True
-        # тело
-        p_ref_body = cell_ref.add_paragraph()
-        _write_fragments(p_ref_body, ref_frags)
-        # правая колонка: тестируемый
-        if len(content_row.cells) > 1:
-            cell_test = content_row.cells[1]
-            para_test_name = cell_test.paragraphs[0]
-            para_test_name.text = ''
-            run_test_name = para_test_name.add_run(test_name)
-            run_test_name.bold = True
-            p_test_body = cell_test.add_paragraph()
-            _write_fragments(p_test_body, test_frags)
-
-        # если есть третий столбец и ключ "Отличия", заполняем
-        if 'Отличия' in entry and len(content_row.cells) > 2:
-            content_row.cells[2].text = entry['Отличия']
+        # 3) строка с содержимым раздела
+        body_row = table.add_row()
+        # референтная колонка
+        if len(body_row.cells) > 0:
+            cell_ref_body = body_row.cells[0]
+            cell_ref_body.text = ''
+            p_ref = cell_ref_body.paragraphs[0]
+            _write_fragments(p_ref, ref_frags)
+        # анализируемая колонка
+        if len(body_row.cells) > 1:
+            cell_test_body = body_row.cells[1]
+            cell_test_body.text = ''
+            p_test = cell_test_body.paragraphs[0]
+            _write_fragments(p_test, test_frags)
+        # если есть третий столбец и поле "Отличия"
+        if 'Отличия' in entry and len(body_row.cells) > 2:
+            body_row.cells[2].text = entry['Отличия']
 
 
 def save_with_timestamp(doc: Document,

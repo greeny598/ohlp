@@ -361,38 +361,43 @@ class DocumentLoader:
         logger.info(f"[Исходный текст]:\n{raw_text[:100]}…")
 
         # 2) определяем тип документа
-        # применяем жёсткие эвристики: имя файла и первая строка
+        # Сначала учитываем override_type, затем — эвристики по имени файла и первой строке,
+        # затем мягкий детектор. Это повышает надёжность.
         if self.override_type:
             self.doc_type = self.override_type
         elif self.auto_detect_type:
+            # --- эвристика по имени файла и первой строке ---
+            doc_type_guess: Optional[str] = None
             try:
-                from difflib import SequenceMatcher
-                # имя файла без пути и расширения
-                file_name_lower = Path(self.file_path).stem.lower()
-                # если в имени содержится ohlp/охлп → считаем OHLP
-                if ('ohlp' in file_name_lower) or ('охлп' in file_name_lower):
-                    self.doc_type = 'ohlp'
+                stem = Path(self.file_path).stem.lower()
+                if 'ohlp' in stem or 'охлп' in stem:
+                    doc_type_guess = 'ohlp'
                 else:
-                    # первая непустая строка текста
-                    first_line = next((ln.strip() for ln in raw_text.splitlines() if ln.strip()), '').lower()
+                    # первая непустая строка
+                    first_line = ''
+                    for ln in raw_text.splitlines():
+                        if ln.strip():
+                            first_line = ln.strip()
+                            break
+                    first_lower = first_line.lower()
+                    # сравниваем с «общая характеристика лекарственного препарата»
                     target = 'общая характеристика лекарственного препарата'
-                    if first_line:
-                        ratio = SequenceMatcher(None, first_line, target).ratio()
-                        # если похожа на заголовок ОХЛП → OHLP
-                        if ratio >= 0.8:
-                            self.doc_type = 'ohlp'
-                        # явный листок-вкладыш
-                        elif first_line.startswith('листок-вкладыш') and ('информация для пациента' in first_line):
-                            self.doc_type = 'leaflet'
-                        else:
-                            self.doc_type = self.detect_document_type(raw_text)
-                    else:
-                        self.doc_type = self.detect_document_type(raw_text)
+                    if first_lower:
+                        from difflib import SequenceMatcher
+                        similarity = SequenceMatcher(None, first_lower, target).ratio()
+                        if similarity >= 0.8:
+                            doc_type_guess = 'ohlp'
+                        elif first_lower.startswith('листок-вкладыш') and 'информация для пациента' in first_lower:
+                            doc_type_guess = 'leaflet'
             except Exception:
-                # fallback на старый детектор
+                # если эвристика не сработала, игнорируем
+                doc_type_guess = None
+            if doc_type_guess:
+                self.doc_type = doc_type_guess
+            else:
                 self.doc_type = self.detect_document_type(raw_text)
         else:
-            self.doc_type = "leaflet"
+            self.doc_type = 'leaflet'
         logger.info(f"Detected document type: {self.doc_type}")
 
         # 3) извлекаем название препарата
