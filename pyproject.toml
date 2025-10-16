@@ -23,6 +23,7 @@ dependencies = [
     "grpcio (>=1.73.1,<2.0.0)",
     "yandexcloud (>=0.350.0,<0.351.0)",
     "olefile (>=0.47,<0.48)",
+    "nest-asyncio (>=1.6.0,<2.0.0)",
 ]
 
 [tool.poetry]

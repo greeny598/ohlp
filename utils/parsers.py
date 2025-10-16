@@ -84,194 +84,99 @@ def extract_sections_from_recommendations(text: str) -> list[str]:
     return sections
 
 
-def split_recommendations(text: str, sections: List[str],
-                          threshold: int = 90) -> Dict[str, str]:
-    """
-    1) Выделяем intro/extra жёстко по паре маркеров.
-    2) Сплитим по %split% и проходим по каждому блоку.
-    3) Ключ = первая непустая строка блока (очищенная от Markdown).
-       Если fuzzy-совпадение ≥ threshold → используем эталонное sections-имя.
-       Иначе → оставляем чистый заголовок.
-    4) Блоки **никогда** не пропадают — все включаются в result.
-    """
+def _strip_markdown_line(s: str) -> str:
+    # [text](url)
+    s = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", s)
+    # **bold** / __bold__
+    s = re.sub(r"(\*\*|__)(.*?)\1", r"\2", s)
+    # *italic* / _italic_
+    s = re.sub(r"(\*|_)(.*?)\1", r"\2", s)
+    # `code`
+    s = re.sub(r"`([^`]+)`", r"\1", s)
+    # list markers / headers at line start
+    s = re.sub(r"^[#>\-*+]+\s*", "", s)
+    return s.strip()
 
-    def _strip_markdown(md: str) -> str:
-        s = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", md)      # [text](url)
-        # **bold** / __underline__
-        s = re.sub(r"(\*\*|__)(.*?)\1", r"\2", s)
-        # *italic* / _italic_
-        s = re.sub(r"(\*|_)(.*?)\1", r"\2", s)
-        s = re.sub(r"`([^`]+)`", r"\1", s)                    # `code`
-        # list markers / headers
-        s = re.sub(r"^[#>\-*+]+\s*", "", s)
-        return s.strip()
+def _extract_block_by_marker(text: str, marker: str) -> tuple[str, str | None]:
+    """
+    Возвращает (text_without_block, block_text_or_None).
+    Если маркера два — берём между ними.
+    Если маркер один — берём от него до конца.
+    Маркер регистронезависимый, пробелы вокруг допускаются.
+    """
+    rx = re.compile(rf"%\s*{re.escape(marker)}\s*%", re.IGNORECASE)
+    hits = list(rx.finditer(text))
+    if len(hits) >= 2:
+        a, b = hits[0], hits[1]
+        block = text[a.end():b.start()].strip()
+        new_text = text[:a.start()] + text[b.end():]
+        return new_text, block
+    elif len(hits) == 1:
+        a = hits[0]
+        block = text[a.end():].strip()
+        new_text = text[:a.start()]
+        return new_text, block
+    else:
+        return text, None
 
+def split_recommendations(text: str, sections: List[str], threshold: int = 90) -> Dict[str, str]:
+    """
+    Ключи — ТОЛЬКО заголовки из документа (первая непустая строка после %split%).
+    %intro% и %extra% вырезаются ДО сплита:
+      - парой маркеров: между ними;
+      - одиночный маркер: от него до конца.
+    Остаточные служебные строки внутри блоков удаляются.
+    """
     result: Dict[str, str] = {}
 
-    # 1) Intro
-    m = re.search(r"%intro%(.*?)%intro%", text, flags=re.DOTALL)
-    if m:
-        result["intro"] = m.group(1).strip()
+    # 1) Вырезаем intro
+    work, intro = _extract_block_by_marker(text or "", "intro")
+    if intro:
+        result["intro"] = intro
 
-    # 2) Extra
-    m = re.search(r"%extra%(.*?)%extra%", text, flags=re.DOTALL)
-    if m:
-        result["extra"] = m.group(1).strip()
+    # 2) Вырезаем extra (включая «до конца», если маркер один)
+    work, extra = _extract_block_by_marker(work, "extra")
+    if extra:
+        result["extra"] = extra
 
-    # 3) Split‐блоки
-    parts = text.split("%split%")
-    # все куски между маркерами:
-    raw_blocks = parts[1:-1] if len(parts) > 2 else []
+    # 3) Режем на блоки по %split%
+    parts = re.split(r'%\s*split\s*%', work, flags=re.IGNORECASE)
+    # если нет ни одного %split%, считаем весь work одним блоком
+    raw_blocks = parts[1:] if len(parts) > 1 else ([work] if work.strip() else [])
 
+    # 4) Собираем блоки
     for raw in raw_blocks:
-        raw = raw.strip()
+        raw = (raw or "").strip()
         if not raw:
             continue
 
-        lines = raw.splitlines()
-        # первая непустая строка
-        title_line = next((ln for ln in lines if ln.strip()), "")
-        title_clean = _strip_markdown(title_line) or "section"
+        lines = [ln.rstrip() for ln in raw.splitlines()]
+        # Удаляем служебные строки-маркеры, если вдруг остались
+        cleaned_lines = []
+        for ln in lines:
+            ln_stripped = ln.strip().lower()
+            if ln_stripped in ("%intro%", "%extra%", "%split%"):
+                continue
+            cleaned_lines.append(ln)
+        if not cleaned_lines:
+            continue
 
-        # весь остальной текст после заголовка
-        idx = lines.index(title_line) if title_line in lines else -1
-        content = (
-            "\n".join(lines[idx + 1:]).strip() if idx >= 0 else raw
-        )
+        # Заголовок = первая непустая строка (без markdown)
+        title_line = next((ln for ln in cleaned_lines if ln.strip()), "")
+        title_clean = _strip_markdown_line(title_line) or "section"
 
-        # fuzzy match
-        best = process.extractOne(
-            title_clean, sections, scorer=fuzz.partial_ratio)
-        if best and best[1] >= threshold:
-            key = best[0]
-        else:
-            key = title_clean
+        # Контент = всё после первой непустой строки
+        first_idx = cleaned_lines.index(title_line)
+        content = "\n".join(cleaned_lines[first_idx + 1:]).strip()
 
-        # если этот ключ уже есть — просто доклеим
+        # Ключ берём строго из документа (НЕ подменяем эталоном)
+        key = title_clean
+
+        # Если ключ уже встречался, дописываем (редкий, но безопасный кейс)
         if key in result:
-            result[key] += "\n\n" + content
+            result[key] += ("\n\n" + content if content else "")
         else:
             result[key] = content
-
-    return result
-
-
-def split_ohlp_sections(text: str, sections: List[str], threshold: int = 70) -> Dict[str, str]:
-    starts, ends = compute_section_positions(text, sections, threshold)
-    result: Dict[str, str] = {}
-
-    for i, sec in enumerate(sections):
-        start = ends[i] if ends[i] >= 0 else 0
-        next_start = starts[i+1] if i+1 < len(sections) and starts[i+1] >= 0 else len(text)
-
-        raw = text[start:next_start].strip()
-        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-
-        # нормализация: только буквы и цифры в нижнем регистре
-        def normalize_cmp(s: str) -> str:
-            return re.sub(r'\W+', '', s.lower())
-
-        sec_key = normalize_cmp(sec)
-
-        # убираем подряд **все** заголовки в начале, пока они совпадают с sec_key
-        while lines and normalize_cmp(lines[0]) == sec_key:
-            lines.pop(0)
-
-        # убираем подряд идущие дубли
-        deduped = []
-        prev = None
-        for ln in lines:
-            if ln != prev:
-                deduped.append(ln)
-            prev = ln
-
-        result[sec] = "\n".join(deduped)
-
-    return result
-
-
-def split_leaflet_sections(text: str, sections: List[str], threshold: int = 70) -> Dict[str, str]:
-    """
-    Разбивает текст листка-вкладыша на разделы по заголовкам из списка sections.
-
-    Применяется точный мэппинг по номеру раздела (число перед ".").
-    Если точный мэппинг не найден — пытается fuzzy matching заголовка.
-
-    Args:
-        text: полный текст листка-вкладыша (строки с NBSP).
-        sections: список заголовков секций в формате '1. Заголовок', ...
-        threshold: порог для fuzzy-matching (0-100).
-    Returns:
-        Словарь {оригинальный_секционный_заголовок: текст_раздела}
-    """
-    # Заменяем NBSP на обычные пробелы и разбиваем на строки
-    lines = text.replace('\xa0', ' ').splitlines()
-
-    # Ищем начало TOC
-    toc_start = next((i for i, ln in enumerate(lines) if 'Содержание' in ln), None)
-    if toc_start is None:
-        raise ValueError('Не найден блок "Содержание"')
-
-    # Определяем начало содержательной части — по первой строке с номером раздела
-    toc_end = next((j for j in range(toc_start + 1, len(lines)) if re.match(r"^\s*\d+\.\s*", lines[j])), None)
-    if toc_end is None:
-        raise ValueError('Не удалось определить начало содержательной части')
-
-    main_lines = lines[toc_end:]
-
-    # Подготовка эталонных заголовков (номер и текст)
-    # Маппинг номера -> раздел в sections
-    num_to_section: Dict[str, str] = {}
-    placeholder_norms: Dict[str, str] = {}
-    for sec in sections:
-        m = re.match(r"^\s*(\d+)\.\s*(.*)$", sec)
-        if m:
-            num, title = m.groups()
-            num_to_section[num] = sec
-            placeholder_norms[num] = normalize_heading(title)
-
-    # Regex для обнаружения заголовков: номер + точка + заголовок до дефиса/тире
-    heading_re = re.compile(r"^(?P<num>\d+)\.\s*(?P<title>.+?)(?=[\-–—]|$)")
-
-    # Находим все заголовки
-    headings: List[tuple] = []  # (line_index, section_name)
-    for idx, ln in enumerate(main_lines):
-        stripped = ln.strip()
-        m = heading_re.match(stripped)
-        if not m:
-            continue
-        num = m.group('num')
-        # Пробуем точный мэппинг по номеру
-        section = num_to_section.get(num)
-        if section is None:
-            # Фоллбэк: fuzzy по тексту заголовка
-            raw_title = m.group('title').strip()
-            norm_raw = normalize_heading(raw_title)
-            # Сравниваем с нормами всех placeholder_norms
-            best = process.extractOne(norm_raw, list(placeholder_norms.values()), scorer=fuzz.partial_ratio)
-            if best and best[1] >= threshold:
-                # находим соответствующий раздел по словарю
-                # placeholder_norms: num->norm, so invert lookup
-                for key, norm in placeholder_norms.items():
-                    if norm == best[0]:
-                        section = num_to_section[key]
-                        break
-        if section:
-            headings.append((idx, section))
-
-    if not headings:
-        raise ValueError('Не найдены заголовки в содержательной части')
-
-    # Добавляем конец документа
-    indices = [idx for idx, _ in headings] + [len(main_lines)]
-
-    # Разбиваем на блоки
-    result: Dict[str, str] = {}
-    for i, (idx, section) in enumerate(headings):
-        start = indices[i] + 1
-        end = indices[i + 1]
-        block = '\n'.join(main_lines[start:end]).strip()
-        result[section] = block
 
     return result
 

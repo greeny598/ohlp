@@ -1,7 +1,8 @@
 import logging
-from typing import Dict, Any, Literal
+from typing import Dict, Any, Literal, List, Tuple, Optional
 import json
-import requests
+import re
+from difflib import SequenceMatcher
 
 from pydantic import BaseModel, validator, Extra, ValidationError
 from langchain.prompts import PromptTemplate
@@ -30,17 +31,139 @@ class Recommendation(BaseModel):
             return json.dumps(v, ensure_ascii=False)
         return str(v)
 
+
 class SectionChecker:
     def __init__(self, api_provider: str = 'yandex'):
         self.yandexgpt_key = config.yandexgpt_KEY.get_secret_value()
         self.yandex_cloud_folder_id = config.yandex_cloud_folder_id.get_secret_value()
-        #self.deepseek_key = config.deepseek_KEY.get_secret_value()
-        #self.openai_key = config.openai_KEY.get_secret_value()
-        self.llm = self._set_api_provider(api_provider)            
+        # self.deepseek_key = config.deepseek_KEY.get_secret_value()
+        # self.openai_key = config.openai_KEY.get_secret_value()
+        self.llm = self._set_api_provider(api_provider)
         self.prompt_diffs = self._create_diffs_prompt_template()
         self.chain_diffs = RunnableSequence(self.prompt_diffs | self.llm)
         self.prompt_recs = self._create_recs_prompt_template()
         self.chain_recs = RunnableSequence(self.prompt_recs | self.llm)
+
+    # --------------- Новая/улучшенная утилитарная часть для структурного сопоставления ---------------
+
+    # снимаем "10.", "4.1.", "9 -", "7) " и т.п.
+    _num_prefix = re.compile(r'^\s*\d+(?:\.\d+)?\s*[.)-–—]*\s*')
+    _ws_multi = re.compile(r'\s+')
+    _edge_punct = re.compile(r'^[\s<>\-\–—:;,\.\)\(]+|[\s<>\-\–—:;,\.\)\(]+$')
+
+    _optional_markers = re.compile(
+        r'\((?:заполняется\s+при\s+необходимости|если\s+применимо|при\s+необходимости)\)',
+        flags=re.IGNORECASE
+    )
+
+    @classmethod
+    def normalize_title(cls, title: str) -> str:
+        """
+        Нормализуем заголовок для сравнения:
+        - снимаем числовой префикс (но сам текст заголовка не подменяем)
+        - схлопываем пробелы
+        - убираем крайние угловые скобки/пунктуацию, если они "обрамляют" заголовок
+        Важно: регистр не меняем, содержимое скобок сохраняем — это позволяет ловить мелкие расхождения
+        вроде «НОМЕР (НОМЕРА) ...» vs «НОМЕР ...».
+        """
+        if title is None:
+            return ''
+        t = title.strip()
+        t = cls._num_prefix.sub('', t)
+        t = cls._edge_punct.sub('', t)
+        t = cls._ws_multi.sub(' ', t)
+        return t.strip()
+
+    @staticmethod
+    def similarity(a: str, b: str) -> float:
+        return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+    def _best_match(self, actual: str, sections_norm: List[str]) -> Tuple[int, float]:
+        """Находит лучший эталон по похожести для actual среди нормализованных sections_norm."""
+        best_i, best_s = -1, 0.0
+        for i, s in enumerate(sections_norm):
+            sim = self.similarity(actual, s)
+            if sim > best_s:
+                best_s, best_i = sim, i
+        return best_i, best_s
+
+    def compare_structure(
+        self,
+        sections: List[str],
+        test_blocks: Dict[str, str],
+        sim_minor_diff: float = 0.995,  # почти идентично, иначе — замечание о расхождении формулировки
+        sim_any_match: float = 0.80     # ниже — считаем, что соответствия НЕТ (лишняя секция)
+    ) -> List[Dict[str, Any]]:
+        """
+        Сравнивает структуру: эталонные заголовки (sections) vs. заголовки документа (ключи test_blocks).
+        ВНИМАНИЕ: НИКОГДА не подменяет заголовки из документа — только формирует рекомендации.
+
+        Возвращает список рекомендаций (каждая — dict как у Recommendation + поле "section" для адресации).
+        """
+        recommendations: List[Dict[str, Any]] = []
+
+        # Нормализованные списки для сравнения
+        actual_titles = list(test_blocks.keys())
+        actual_norm = [self.normalize_title(x) for x in actual_titles]
+
+        sections = sections or []
+        sections_norm = [self.normalize_title(x) for x in sections]
+
+        # Куда сопоставился каждый actual и каждый expected
+        matched_expected_idx: Dict[int, int] = {}  # actual_idx -> expected_idx
+        used_expected: set = set()
+
+        # 1) проходим по фактическим заголовкам и ищем ближайший эталон
+        for i, a_norm in enumerate(actual_norm):
+            exp_i, sim = self._best_match(a_norm, sections_norm) if sections_norm else (-1, 0.0)
+
+            if exp_i == -1 or sim < sim_any_match:
+                # Лишняя секция — не нашли ничего достаточно похожего
+                recommendations.append({
+                    "section": actual_titles[i],
+                    "compliance": "not_complied",
+                    "comments": (
+                        "В документе обнаружен раздел, отсутствующий в рекомендуемом перечне: "
+                        f"«{actual_titles[i]}». Проверьте корректность включения данного раздела."
+                    )
+                })
+            else:
+                # Есть разумное совпадение с эталоном
+                matched_expected_idx[i] = exp_i
+                used_expected.add(exp_i)
+
+                # Отмечаем даже минимальные отличия формулировки
+                exp_title = sections[exp_i]
+                act_title = actual_titles[i]
+                if a_norm.lower() != sections_norm[exp_i].lower() or sim < sim_minor_diff:
+                    comments = (
+                        "Название раздела в документе отличается от рекомендуемого.\n"
+                        f"— Рекомендуемый заголовок: «{exp_title}»\n"
+                        f"— Фактический заголовок: «{act_title}»\n"
+                        "Рекомендация: привести формулировку в соответствие с эталоном "
+                        "(если это не обусловлено утверждённой формой документа)."
+                    )
+                    recommendations.append({
+                        "section": act_title,
+                        "compliance": "partial",
+                        "comments": comments
+                    })
+
+        # 2) теперь отметим отсутствующие в документе разделы из эталона
+        for exp_idx, exp_title in enumerate(sections):
+            if exp_idx not in used_expected:
+                # Не найдено соответствующего фактического заголовка
+                is_optional = bool(self._optional_markers.search(exp_title))
+                note = " Раздел помечен как необязательный (заполняется при необходимости/если применимо)." if is_optional else ""
+                recommendations.append({
+                    "section": exp_title,
+                    "compliance": "not_complied",
+                    "comments": f"В документе отсутствует рекомендуемый раздел: «{exp_title}».{note}"
+                })
+
+        return recommendations
+
+    # ---------------------------------- LLM часть (без изменений) ----------------------------------
 
     def _set_api_provider(self, api_provider: str) -> ChatOpenAI:
         if api_provider == 'yandex':
@@ -128,8 +251,6 @@ class SectionChecker:
                    - "compliance" - степень соответствия ("complied"/"partial"/"not_complied")
                    - "comments" - пояснительный комментарий (тип данных - только строка!)
 
-               
-
             Выведите результат строго в формате JSON-массива, без дополнительных пояснений или текста вне структуры JSON.
         """
         return PromptTemplate(
@@ -206,7 +327,7 @@ class SectionChecker:
         except Exception as e:
             logger.error(f"Ошибка при обработке recommends: {e}")
             return {'compliance': 'not_complied', 'comments': ''}
-    
+
     async def check_recommends_async(self,
                                      recommendations_text: str,
                                      actual_text: str) -> Dict[str, Any]:
