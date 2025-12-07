@@ -20,14 +20,14 @@ import asyncio
 import json
 
 # --- Пользовательские параметры (ОТРЕДАКТИРУЙТЕ ПОД СЕБЯ) ---
-test_path = "D:/Work/Python_git/ohlp/test_data/ohlp_primovist.pdf"
-ref_path = "D:/Work/Python_git/ohlp/test_data/ohlp_primovist_etalon.pdf"
+test_path = "D:/Work/Python_git/ohlp/test_data/ohlp_adjoprofen.pdf"
+ref_path = "D:/Work/Python_git/ohlp/test_data/ohlp_deksalgin.pdf"
 rec_path = "D:/Work/Python_git/ohlp/test_data/recommendations_OHLP_labeled.docx"
 template_name = "report_template_ohlp.docx"
 template_dir = "./templates"
 output_dir = "./results"
 
-provider = "openai"
+provider = "yandex"
 prefix = "DBG"
 concurrency = 5
 pause_between_steps = True   # False — без пауз

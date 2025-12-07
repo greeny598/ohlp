@@ -188,6 +188,8 @@ async def check_recommendations(
 
     async def check_one(sec: str):
         actual_text = test_blocks.get(sec, "")
+
+        # ищем самое близкое название среди ключей recs_blocks
         matches = get_close_matches(sec, recs_blocks.keys(), n=1, cutoff=0.7)
         if not matches:
             return sec, {'compliance': 'not_complied', 'comments': ''}
@@ -198,10 +200,8 @@ async def check_recommendations(
 
         async with sem:
             try:
-                if hasattr(checker, 'check_recommends_async') and inspect.iscoroutinefunction(checker.check_recommends_async):
-                    result = await checker.check_recommends_async(rec_part, actual_text)
-                else:
-                    result = await asyncio.to_thread(checker.check_recommends, rec_part, actual_text)
+                # ⬇️ ВСЕГДА используем асинхронный LLM-вызов
+                result = await checker.check_recommends_async(rec_part, actual_text)
                 return sec, result
             except Exception as e:
                 logger.error(f"Ошибка при проверке рекомендаций для '{sec}': {e}")
@@ -229,21 +229,20 @@ def write_recommendations_and_table(
     table_index: int = 2,
 ) -> None:
     logger.info("Вставка рекомендаций и заполнение таблицы…")
+    
     try:
         insert_recommendations(doc, recommendations)
     except Exception as e:
         logger.error(f"Ошибка вставки рекомендаций: {e}")
 
-    compare_data = [
-        {
-            "Раздел": sec,
-            "Содержимое референтного документа": ref_blocks.get(sec, ""),
-            "Содержимое тестируемого документа": test_blocks.get(sec, ""),
-        }
-        for sec in sections
-    ]
     try:
-        fill_comparison_table(doc, compare_data, table_index=table_index)
+        fill_comparison_table(
+            doc,
+            recommended_sections=sections,
+            ref_blocks=ref_blocks,
+            test_blocks=test_blocks,
+            table_index=table_index
+        )
     except Exception as e:
         logger.error(f"Ошибка заполнения таблицы сравнения: {e}")
 

@@ -7,7 +7,6 @@ from docx import Document
 from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
 from docx.shared import Cm, Pt
-from rapidfuzz import fuzz
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.text import WD_COLOR_INDEX
 from docx.shared import RGBColor
@@ -273,102 +272,67 @@ def _write_fragments(paragraph, frags: List[Tuple[str, str, Tuple[int, int, int]
             r, g, b = color
             run.font.color.rgb = RGBColor(r, g, b)
 
-
 def fill_comparison_table(doc: Document,
                           recommended_sections: List[str],
                           ref_blocks: Dict[str, str],
                           test_blocks: Dict[str, str],
                           table_index: int = 2) -> None:
     """
-    Заполнение таблицы сравнения по эталонной структуре recommended_sections.
-
-    1) Таблица строится строго по порядку разделов из recommended_sections.
-    2) Блоки из ref_blocks и test_blocks сопоставляются с этими разделами
-       по нечеткому совпадению заголовков (порог 0.8).
-    3) В каждую тройку строк:
-         - строка 1: эталонный заголовок (из recommended_sections);
-         - строка 2: заголовки референтного и тестового документов;
-         - строка 3: текст с подсветкой различий.
-    4) Не сопоставленные разделы отправляются в блок «Дополнительные разделы»
-       в конце таблицы.
+    ЛИНЕЙНОЕ заполнение таблицы:
+    i-й эталон → i-й референт → i-й тестируемый.
+    Заголовки берутся ИЗ КЛЮЧЕЙ словарей ref_blocks/test_blocks.
+    Текст разделов — из values.
     """
-
     table = doc.tables[table_index]
 
-    # -----------------------------------------
-    # 0. Очистка таблицы: оставляем только шапку
-    # -----------------------------------------
+    # очищаем таблицу, оставляя только шапку (первую строку)
     while len(table.rows) > 1:
         tbl = table._tbl
         tbl.remove(tbl.tr_lst[-1])
 
-    # -----------------------------------------
-    # 1. Вспомогательная функция сопоставления
-    #    блоков документа с эталонными разделами
-    # -----------------------------------------
-    def match_blocks_to_sections(
-        blocks: Dict[str, str],
-        sections: List[str],
-        threshold: float = 0.80,
-    ) -> Tuple[Dict[str, Tuple[str, str]], List[Tuple[str, str]]]:
-        """
-        Возвращает:
-          assigned: {canonical_section -> (header, text)}
-          extras:   [ (header, text), ... ] — несопоставленные разделы
-        """
-        assigned: Dict[str, Tuple[str, str]] = {}
-        extras: List[Tuple[str, str]] = []
+    # превращаем dict → списки (ключ сохраняет порядок)
+    ref_items = list(ref_blocks.items())
+    test_items = list(test_blocks.items())
 
-        for raw_title, text in blocks.items():
-            header = _clean_section_name(raw_title or "")
-            if not header and not text:
-                continue
+    total = len(recommended_sections)
 
-            best_sec = None
-            best_score = 0.0
-            h_norm = header.lower()
+    for i in range(total):
 
-            for sec in sections:
-                score = SequenceMatcher(None, h_norm, sec.lower()).ratio()
-                if score > best_score:
-                    best_sec = sec
-                    best_score = score
-
-            if best_sec is not None and best_score >= threshold and best_sec not in assigned:
-                assigned[best_sec] = (header, text or "")
-            else:
-                # либо не нашли хорошего совпадения, либо такой sec уже занят
-                extras.append((header, text or ""))
-
-        return assigned, extras
-
-    # -----------------------------------------
-    # 2. Сопоставляем ref/test блоки с эталонной структурой
-    # -----------------------------------------
-    ref_assigned, ref_extras = match_blocks_to_sections(ref_blocks, recommended_sections)
-    test_assigned, test_extras = match_blocks_to_sections(test_blocks, recommended_sections)
-
-    # -----------------------------------------
-    # 3. Основные разделы по recommended_sections
-    # -----------------------------------------
-    for sec in recommended_sections:
-        # Заголовок и текст референтного документа
-        if sec in ref_assigned:
-            ref_header, ref_body = ref_assigned[sec]
+        # -----------------------------
+        # 1. Заголовок + тело референтного блока
+        # -----------------------------
+        if i < len(ref_items):
+            ref_title, ref_text = ref_items[i]
         else:
-            ref_header, ref_body = "", ""
+            ref_title, ref_text = "", ""
 
-        # Заголовок и текст тестируемого документа
-        if sec in test_assigned:
-            test_header, test_body = test_assigned[sec]
+        # -----------------------------
+        # 2. Заголовок + тело тестового блока
+        # -----------------------------
+        if i < len(test_items):
+            test_title, test_text = test_items[i]
         else:
-            test_header, test_body = "", ""
+            test_title, test_text = "", ""
 
-        # Подсветка различий по ПОЛНОМУ тексту раздела
+        # -----------------------------
+        # 3. Заголовки для строки №2 (берём ИЗ КЛЮЧЕЙ, это важно!)
+        # -----------------------------
+        ref_header = _clean_section_name(ref_title)
+        test_header = _clean_section_name(test_title)
+
+        # -----------------------------
+        # 4. Текст разделов (ничего не вырезаем)
+        # -----------------------------
+        ref_body = ref_text or ""
+        test_body = test_text or ""
+
+        # -----------------------------
+        # 5. Подсветка различий
+        # -----------------------------
         ref_frags, test_frags = highlight_differences(ref_body, test_body)
 
         # ==========================================================================
-        # СТРОКА №1: ЭТАЛОННЫЙ ЗАГОЛОВОК (из рекомендаций)
+        # СТРОКА №1: ЭТАЛОННЫЙ ЗАГОЛОВОК
         # ==========================================================================
         row1 = table.add_row()
         merged = row1.cells[0]
@@ -377,7 +341,7 @@ def fill_comparison_table(doc: Document,
 
         merged.text = ""
         p = merged.paragraphs[0]
-        run = p.add_run(sec)
+        run = p.add_run(recommended_sections[i])
         run.bold = True
         run.font.size = Pt(12)
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -391,10 +355,9 @@ def fill_comparison_table(doc: Document,
         cell_ref = row2.cells[0]
         cell_ref.text = ""
         p_ref_h = cell_ref.paragraphs[0]
-        if ref_header:
-            run_ref_h = p_ref_h.add_run(ref_header)
-            run_ref_h.bold = True
-            run_ref_h.font.size = Pt(12)
+        run_ref_h = p_ref_h.add_run(ref_header)
+        run_ref_h.bold = True
+        run_ref_h.font.size = Pt(12)
         p_ref_h.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         # TEST HEADER
@@ -402,14 +365,13 @@ def fill_comparison_table(doc: Document,
             cell_test = row2.cells[1]
             cell_test.text = ""
             p_test_h = cell_test.paragraphs[0]
-            if test_header:
-                run_test_h = p_test_h.add_run(test_header)
-                run_test_h.bold = True
-                run_test_h.font.size = Pt(12)
+            run_test_h = p_test_h.add_run(test_header)
+            run_test_h.bold = True
+            run_test_h.font.size = Pt(12)
             p_test_h.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         # ==========================================================================
-        # СТРОКА №3: Текст с подсветкой различий
+        # СТРОКА №3: Сравнение текста (с подсветкой)
         # ==========================================================================
         row3 = table.add_row()
 
@@ -426,74 +388,7 @@ def fill_comparison_table(doc: Document,
             p_test_body = cell_test_body.paragraphs[0]
             _write_fragments(p_test_body, test_frags)
 
-    # -----------------------------------------
-    # 4. Дополнительные разделы (не нашедшие секцию в эталоне)
-    # -----------------------------------------
-    extras_total = max(len(ref_extras), len(test_extras))
-    if extras_total > 0:
-        # Заголовок блока "Дополнительные разделы"
-        row_hdr = table.add_row()
-        merged = row_hdr.cells[0]
-        for c in row_hdr.cells[1:]:
-            merged = merged.merge(c)
-        merged.text = ""
-        p_hdr = merged.paragraphs[0]
-        run_hdr = p_hdr.add_run("Дополнительные разделы")
-        run_hdr.bold = True
-        run_hdr.font.size = Pt(12)
-        p_hdr.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-        # Пары дополнительных блоков
-        for i in range(extras_total):
-            # Заголовки
-            row_t = table.add_row()
-            # Тела
-            row_b = table.add_row()
-
-            # REF extra
-            if i < len(ref_extras):
-                ref_h, ref_text = ref_extras[i]
-            else:
-                ref_h, ref_text = "", ""
-
-            # TEST extra
-            if i < len(test_extras):
-                test_h, test_text = test_extras[i]
-            else:
-                test_h, test_text = "", ""
-
-            # строка заголовков
-            cell_ref_h = row_t.cells[0]
-            cell_ref_h.text = ""
-            p_ref_h = cell_ref_h.paragraphs[0]
-            if ref_h:
-                r = p_ref_h.add_run(ref_h)
-                r.bold = True
-                r.font.size = Pt(12)
-            p_ref_h.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-            if len(row_t.cells) > 1:
-                cell_test_h = row_t.cells[1]
-                cell_test_h.text = ""
-                p_test_h = cell_test_h.paragraphs[0]
-                if test_h:
-                    r2 = p_test_h.add_run(test_h)
-                    r2.bold = True
-                    r2.font.size = Pt(12)
-                p_test_h.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-            # строка текста (с подсветкой отличий между ref/test extra)
-            cell_ref_b = row_b.cells[0]
-            cell_ref_b.text = ""
-            cell_test_b = row_b.cells[1]
-            cell_test_b.text = ""
-
-            p_ref_b = cell_ref_b.paragraphs[0]
-            p_test_b = cell_test_b.paragraphs[0]
-
-            ref_frags_extra, test_frags_extra = highlight_differences(ref_text, test_text)
-            _write_fragments(p_ref_b, ref_frags_extra)
-            _write_fragments(p_test_b, test_frags_extra)
 
 def save_with_timestamp(doc: Document,
                         filetype: str,

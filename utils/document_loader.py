@@ -283,39 +283,94 @@ class DocumentLoader:
         text = re.sub(pattern, r"\1 ®", text)
 
         return text
+        
+    def _ensure_blank_before_headings(self, text: str) -> str:
+        """Оставляет пустую строку только перед нумерованными заголовками."""
+        
+        lines = text.splitlines()
+        out = []
+
+        def is_heading(line: str) -> bool:
+            return bool(re.match(r"\s*\d+(?:\.\d+)*[.)]?\s+", line))
+
+        prev_blank = False
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+
+            if is_heading(stripped):
+                # если перед заголовком не было пустой строки → вставляем
+                if not prev_blank:
+                    out.append("")  # пустая строка
+                out.append(line)
+                prev_blank = False
+                continue
+
+            # обычные строки — НЕ должны иметь лишних пустых выше
+            if stripped == "":
+                # пустая строка тут не нужна — пропускаем
+                prev_blank = True
+                continue
+
+            # обычный текст — пишем без добавления пустых строк
+            out.append(line)
+            prev_blank = False
+
+        return "\n".join(out)
+
     
     def _clean_common(self, text: str) -> str:
+        """Консервативная очистка текста без удаления структурных переносов."""
+        # Декод HTML-сущностей
         text = html.unescape(text)
+        # Восстановление ™, ®, ©, если OCR их испортил
         text = self._restore_trademarks(text)
-
-        # 1) Сначала нормализуем маркеры и оставляем их в тексте
-        text = self._normalize_bullets_keep(text, style="dot")  # или "dash"
-        
-        # остальной пайплайн можно оставить:
+        # Нормализация буллетов (если нужны)
+        text = self._normalize_bullets_keep(text, style="dot")
+        # Убираем markdown-заголовки (# ...), иногда встречающиеся в PDF → TXT
         text = re.sub(r"^#+\s+", "", text, flags=re.MULTILINE)
+        # Удаляем строки "Page 10", "10", которые идут отдельной строкой
         text = re.sub(r"(?mi)^[Pp]age\s*\d+\s*$|^\d+\s*$", "", text)
-        text = re.sub(r"(\w)\s*[-–—]\s*(\w)", r"\1-\2", text)  # не трогает наши буллеты
-        text = re.sub(r"(?<![\.:!?])\n(?=[А-ЯA-Za-z0-9])", " ", text)
+        # Исправляем " - " и прочие OCR -> " - " на нормальные дефисы
+        text = re.sub(r"(\w)\s*[-–—]\s*(\w)", r"\1-\2", text)
+        # ВАЖНО: НЕ склеивать строки перед заголовками.
+        # Склеиваем только одиночный перенос перед буквой (не цифрой).
+        text = re.sub(
+            r"(?<![\.:!?])(?<!\n)\n(?=[A-Za-zА-Яа-я])",
+            " ",
+            text,
+        )
+        # Нормализация пробелов
         text = re.sub(r"[ \t]+", " ", text)
+        # Убираем пробелы перед пунктуацией (word , → word,)
         text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+        # URL-постфиксы
         text = re.sub(r"(https?://[^\s,]+)[\.,]?", r"\1", text)
-        return text.strip()
+        # Не трогаем пустые строки
+        return text.strip("\n ")
+
 
     def _clean_ohlp(self, text: str) -> str:
-        """
-        Специфика OHLP
-        """
         text = self._clean_common(text)
-        text = re.sub(r"%\s*split\s*%", "\n%SPLIT%\n",
-                      text, flags=re.IGNORECASE)
-        text = re.sub(r"%\s*intro\s*%", "\n%INTRO%\n",
-                      text, flags=re.IGNORECASE)
-        text = re.sub(r"%\s*extra\s*%", "\n%EXTRA%\n",
-                      text, flags=re.IGNORECASE)
+
+        text = re.sub(r"%\s*split\s*%",  "\n%SPLIT%\n",  text, flags=re.IGNORECASE)
+        text = re.sub(r"%\s*intro\s*%",  "\n%INTRO%\n",  text, flags=re.IGNORECASE)
+        text = re.sub(r"%\s*extra\s*%",  "\n%EXTRA%\n",  text, flags=re.IGNORECASE)
+
         text = re.sub(r"N\s*\.\s*B\s*!+", "ВАЖНО:", text, flags=re.IGNORECASE)
-        text = re.sub(r"\n{3,}", "\n\n%SECTION_BREAK%\n\n", text)
-        text = re.sub(r"\n{2,}", "\n\n", text)
-        return text
+
+        text = re.sub(
+            r"\n{3,}",
+            "\n\n%SECTION_BREAK%\n\n",
+            text
+        )
+
+        # 🔥 финальная нормализация пустых строк
+        text = self._ensure_blank_before_headings(text)
+
+        return text.strip("\n ")
+
+
 
     def _clean_leaflet(self, text: str) -> str:
         """
@@ -416,8 +471,6 @@ class DocumentLoader:
             cleaned = re.sub(r'-(?=\d+\.)', '\n', cleaned)
             # 2) обеспечить перенос перед любым N., где за точкой идёт заглавная
             cleaned = re.sub(r'(?<!\n)(\d+\.)\s*(?=[А-ЯЁ])', r'\n\1 ', cleaned)
-            # 3) убрать подряд идущие пустые строки (оставляя по одной)
-            cleaned = re.sub(r'\n{2,}', '\n', cleaned).strip()
 
         self.text = cleaned
         return self.text
