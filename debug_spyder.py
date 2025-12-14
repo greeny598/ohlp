@@ -20,8 +20,8 @@ import asyncio
 import json
 
 # --- Пользовательские параметры (ОТРЕДАКТИРУЙТЕ ПОД СЕБЯ) ---
-test_path = "D:/Work/Python_git/ohlp/test_data/ohlp_adjoprofen.pdf"
-ref_path = "D:/Work/Python_git/ohlp/test_data/ohlp_deksalgin.pdf"
+test_path = "D:/Work/Python_git/ohlp/test_data/04_ohlp_adjioprofen.pdf"
+ref_path = "D:/Work/Python_git/ohlp/test_data/04_ohlp_etalon.pdf"
 rec_path = "D:/Work/Python_git/ohlp/test_data/recommendations_OHLP_labeled.docx"
 template_name = "report_template_ohlp.docx"
 template_dir = "./templates"
@@ -86,11 +86,7 @@ recommendations = loop.run_until_complete(
 # 5) Загружаем DOCX-шаблон
 doc = load_template(template_dir, template_name)
 print("[5/7] Шаблон DOCX загружен\n")
-if pause_between_steps:
-    try:
-        input("Нажмите Enter, чтобы продолжить…")
-    except EOFError:
-        pass
+
 
 # 6) Вставляем рекомендации и заполняем таблицу сравнения
 write_recommendations_and_table(
@@ -102,11 +98,7 @@ write_recommendations_and_table(
     table_index=2,
 )
 print("[6/7] Рекомендации вставлены и таблица сравнения заполнена\n")
-if pause_between_steps:
-    try:
-        input("Нажмите Enter, чтобы продолжить…")
-    except EOFError:
-        pass
+
 
 # 7) Заменяем плейсхолдеры (имена препаратов и т.п.)
 replace_placeholders(

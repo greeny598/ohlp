@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Tuple
 
 from docx import Document
 from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 from docx.shared import Cm, Pt
 from rapidfuzz import fuzz
@@ -93,6 +94,38 @@ def highlight_differences(a: str, b: str,
             if tag in ('replace', 'insert'):
                 res_b.append(('highlight', tb, color_b))
     return res_a, res_b
+    
+def headers_equal(a: str, b: str) -> bool:
+    if a is None or b is None:
+        return False
+    return a.strip() == b.strip()
+    
+def _norm_header_simple(s: str) -> str:
+    if not s:
+        return ""
+    return (
+        s.replace("\u00A0", " ")
+         .replace("\n", " ")
+         .replace("\r", " ")
+         .strip()
+    )
+
+def set_cell_shading(cell, fill: str = "FF9999"):
+    """
+    Заливает ячейку таблицы цветом (по умолчанию светло-красным).
+    """
+    tc_pr = cell._tc.get_or_add_tcPr()
+
+    # удалить старую заливку, если была
+    for el in tc_pr.findall(qn("w:shd")):
+        tc_pr.remove(el)
+
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), fill)
+
+    tc_pr.append(shd)
 
 
 def replace_placeholders_in_doc(doc: Document, replacements: dict):
@@ -218,6 +251,12 @@ def _clean_section_name(s: str) -> str:
     s = re.sub(r'[\s\*<>"«»\.\-–—\u00A0]+$', '', s)
     return s.strip()
 
+def _norm_header_for_diff(s: str) -> str:
+    if not s:
+        return ""
+    s = s.replace("\u00A0", " ")
+    s = s.replace("\n", " ").replace("\r", " ")
+    return s.strip()
 
 def _first_non_empty_line(text: str) -> str:
     """
@@ -272,6 +311,8 @@ def _write_fragments(paragraph, frags: List[Tuple[str, str, Tuple[int, int, int]
         if kind == 'highlight' and color:
             r, g, b = color
             run.font.color.rgb = RGBColor(r, g, b)
+            
+            
 
 
 def fill_comparison_table(doc: Document,
@@ -387,25 +428,37 @@ def fill_comparison_table(doc: Document,
         # ==========================================================================
         row2 = table.add_row()
 
-        # REF HEADER
         cell_ref = row2.cells[0]
         cell_ref.text = ""
         p_ref_h = cell_ref.paragraphs[0]
+
         if ref_header:
-            run_ref_h = p_ref_h.add_run(ref_header)
-            run_ref_h.bold = True
-            run_ref_h.font.size = Pt(12)
+            run = p_ref_h.add_run(ref_header)
+            run.bold = True
+            run.font.size = Pt(12)
+
+        # 🔴 если отличается от эталона или отсутствует
+        if _norm_header_simple(ref_header) != _norm_header_simple(sec):
+            set_cell_shading(cell_ref, "FF9999")
+
         p_ref_h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
 
         # TEST HEADER
         if len(row2.cells) > 1:
             cell_test = row2.cells[1]
             cell_test.text = ""
             p_test_h = cell_test.paragraphs[0]
+
             if test_header:
-                run_test_h = p_test_h.add_run(test_header)
-                run_test_h.bold = True
-                run_test_h.font.size = Pt(12)
+                run = p_test_h.add_run(test_header)
+                run.bold = True
+                run.font.size = Pt(12)
+
+            # 🔴 если отличается от эталона или отсутствует
+            if _norm_header_simple(test_header) != _norm_header_simple(sec):
+                set_cell_shading(cell_test, "FF9999")
+
             p_test_h.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         # ==========================================================================
@@ -438,7 +491,7 @@ def fill_comparison_table(doc: Document,
             merged = merged.merge(c)
         merged.text = ""
         p_hdr = merged.paragraphs[0]
-        run_hdr = p_hdr.add_run("Дополнительные разделы")
+        run_hdr = p_hdr.add_run("РАЗДЕЛЫ, НЕ СООТВЕТСТВУЮЩИЕ РЕКОМЕНДАЦИЯМ")
         run_hdr.bold = True
         run_hdr.font.size = Pt(12)
         p_hdr.alignment = WD_ALIGN_PARAGRAPH.CENTER
