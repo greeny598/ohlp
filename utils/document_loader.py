@@ -353,6 +353,14 @@ class DocumentLoader:
     def _clean_ohlp(self, text: str) -> str:
         text = self._clean_common(text)
 
+        # Восстанавливаем переносы перед заголовками, если они слиплись с предыдущей строкой
+        # Пример: "... 4.9 Передозировка 5. ФАРМАКОЛОГИЧЕСКИЕ СВОЙСТВА"
+        text = re.sub(
+            r"(?<!\n)(\d+(?:\.\d+)*\.\s+(?=[A-ZА-ЯЁ]))",
+            r"\n\1",
+            text,
+        )
+
         text = re.sub(r"%\s*split\s*%",  "\n%SPLIT%\n",  text, flags=re.IGNORECASE)
         text = re.sub(r"%\s*intro\s*%",  "\n%INTRO%\n",  text, flags=re.IGNORECASE)
         text = re.sub(r"%\s*extra\s*%",  "\n%EXTRA%\n",  text, flags=re.IGNORECASE)
