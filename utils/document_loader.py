@@ -130,6 +130,36 @@ class DocumentLoader:
             return get_pdf_converter() 
         else:
             return get_docx_converter()
+    
+    def _dump_processed_text_txt(self, processed_text: str) -> None:
+        """
+        Сохраняет обработанный (cleaned) текст рядом с исходным файлом в .txt
+        ТОЛЬКО для документов типов: ohlp и leaflet.
+
+        Имя файла: <basename>.txt
+        Пример: /path/doc.pdf -> /path/doc.txt
+                /path/doc.docx -> /path/doc.txt
+
+        Ошибки сохранения не должны ломать пайплайн.
+        """
+        try:
+            if self.doc_type not in ("ohlp", "leaflet"):
+                return
+            if processed_text is None:
+                return
+            if not str(processed_text).strip():
+                return
+
+            src_path = Path(self.file_path)
+            txt_path = src_path.with_suffix(".txt")
+
+            # нормализуем переносы строк для удобства
+            text_to_write = str(processed_text).replace("\r\n", "\n").replace("\r", "\n")
+
+            txt_path.write_text(text_to_write, encoding=self.encoding, errors="replace")
+            logger.info(f"[DocumentLoader] Saved processed text to: {txt_path}")
+        except Exception as e:
+            logger.warning(f"[DocumentLoader] Failed to save processed .txt for '{self.file_path}': {e}")
 
     
     def _extract_brand_from_line(self, line: str) -> str:
@@ -353,14 +383,6 @@ class DocumentLoader:
     def _clean_ohlp(self, text: str) -> str:
         text = self._clean_common(text)
 
-        # Восстанавливаем переносы перед заголовками, если они слиплись с предыдущей строкой
-        # Пример: "... 4.9 Передозировка 5. ФАРМАКОЛОГИЧЕСКИЕ СВОЙСТВА"
-        text = re.sub(
-            r"(?<!\n)(\d+(?:\.\d+)*\.\s+(?=[A-ZА-ЯЁ]))",
-            r"\n\1",
-            text,
-        )
-
         text = re.sub(r"%\s*split\s*%",  "\n%SPLIT%\n",  text, flags=re.IGNORECASE)
         text = re.sub(r"%\s*intro\s*%",  "\n%INTRO%\n",  text, flags=re.IGNORECASE)
         text = re.sub(r"%\s*extra\s*%",  "\n%EXTRA%\n",  text, flags=re.IGNORECASE)
@@ -481,6 +503,10 @@ class DocumentLoader:
             cleaned = re.sub(r'(?<!\n)(\d+\.)\s*(?=[А-ЯЁ])', r'\n\1 ', cleaned)
 
         self.text = cleaned
+        
+        # сохраняем обработанный текст рядом с исходным файлом
+        self._dump_processed_text_txt(self.text)
+        
         return self.text
     
     def _normalize_drug_name(self, text: str) -> str:
