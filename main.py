@@ -1,168 +1,326 @@
-# main.py
-import glob
 import os
+import glob
 import argparse
 import logging
 import asyncio
-
-# --- Настройка логирования ---
-logging.basicConfig(
-    level=logging.DEBUG,  # Или DEBUG для более подробного логирования
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("app.log", encoding='utf-8')  # Вывод в файл
-    ]
-)
+from typing import Dict, Tuple, List, Any
 
 import gradio as gr
 
-# Импорт новой функции генерации отчета
-# Предполагается, что в utils/__init__.py есть: from .report_generator import generate_report
-# или можно импортировать напрямую:
-#from utils.report_generator import generate_report
 from utils.report_generator import generate_report_async
+from section_editor import (
+    build_section_editor,
+    extract_markdown_and_lines,
+    predict_boundaries_from_lines,
+    split_by_line_boundaries,
+    build_lines_view_df,
+    sections_to_preview_df,
+)
 
+# ----------------------------
+# Логирование
+# ----------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.FileHandler("app.log", encoding="utf-8")]
+)
 logger = logging.getLogger(__name__)
 
-# --- Настройка аргументов командной строки ---
-parser = argparse.ArgumentParser(
-    description="Генерация отчета с возможностью выбора провайдера API и параметров сервера Gradio."
-)
-parser.add_argument(
-    "--provider", "-p", default="yandex",
-    help="Имя провайдера для SectionChecker (по умолчанию 'yandex')"
-)
-parser.add_argument(
-    "--host", "-H", default="0.0.0.0",
-    help="Адрес сервера Gradio"
-)
-parser.add_argument(
-    "--port", "-P", type=int, default=7860,
-    help="Порт сервера Gradio"
-)
-parser.add_argument(
-    "--share", "-s", action="store_true",
-    help="Включить публичный шаринг Gradio"
-)
-parser.add_argument(
-    "--n_users", "-n", type=int, default=50,
-    help="Максимальное количество одновременных сессий пользователей"
-)
-
+# ----------------------------
+# Аргументы CLI
+# ----------------------------
+parser = argparse.ArgumentParser()
+parser.add_argument("--provider", "-p", default="yandex")
+parser.add_argument("--host", default="0.0.0.0")
+parser.add_argument("--port", type=int, default=7860)
+parser.add_argument("--share", action="store_true")
 args = parser.parse_args()
 
-# --- Константы по умолчанию ---
+PROVIDER = args.provider
+
+# ----------------------------
+# Пути и шаблоны
+# ----------------------------
 TEMPLATE_DIR = os.getenv("TEMPLATE_DIR", "templates")
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "results")
 REPORT_PREFIX = os.getenv("REPORT_PREFIX", "report")
-PROVIDER = args.provider
 
-# --- Получение списка шаблонов ---
-def get_available_templates():
-    """Получает список доступных шаблонов из папки TEMPLATE_DIR."""
-    try:
-        templates = [os.path.basename(p) for p in glob.glob(os.path.join(TEMPLATE_DIR, "*.docx"))]
-        logger.debug(f"Найденные шаблоны: {templates}")
-        return templates
-    except Exception as e:
-        logger.error(f"Ошибка при поиске шаблонов в '{TEMPLATE_DIR}': {e}")
-        return []
 
-templates = get_available_templates()
+def get_templates():
+    return [os.path.basename(p) for p in glob.glob(os.path.join(TEMPLATE_DIR, "*.docx"))]
 
-# --- Настройка Gradio интерфейса ---
-custom_css = """
-.compact-file {
-  display: inline-block !important;
-  width: 30% !important;
-  margin-right: 1% !important;
-  vertical-align: top;
-}
-.compact-file .file-upload {
-  min-height: 0.25rem !important;
-  height: 0.5rem !important;
-  padding: 0.25rem !important;
-}
-.compact-file .file-upload .file-input {
-  height: 0.5rem !important;
-  line-height: 0.5rem !important;
-}
-.compact-file .file-upload .file-input button {
-  height: 0.5rem !important;
-  line-height: 0.5rem !important;
-}
-"""
 
-with gr.Blocks(css=custom_css) as iface:
-    gr.Markdown("## 📄 Сравнение инструкций и формирование отчета")
+templates = get_templates()
+
+# ----------------------------
+# Кэш извлечения (TEST/REF) — чтобы не гонять Docling по кругу
+# Ключ: (filepath, mtime)
+# Значение: (markdown, lines)
+# ----------------------------
+_extract_cache: Dict[Tuple[str, float], Tuple[str, List[str]]] = {}
+
+
+def cached_extract(path: str) -> Tuple[str, List[str]]:
+    mtime = os.path.getmtime(path)
+    key = (path, mtime)
+    if key in _extract_cache:
+        return _extract_cache[key]
+
+    # имитируем Gradio file object: нужен .name
+    class _F:
+        def __init__(self, name: str):
+            self.name = name
+
+    md, lines = extract_markdown_and_lines(_F(path))
+    _extract_cache[key] = (md, lines)
+    return md, lines
+
+
+def _reset_editor_approval_payload():
+    # approved, final_blocks, final_order, final_boundaries, status
+    return False, {}, [], [], ""
+
+
+# ============================================================
+# UI
+# ============================================================
+with gr.Blocks() as app:
+    gr.Markdown("## 📄 Сравнение инструкций — ручной контроль разбиения TEST/REF")
+
+    # 1) Строка загрузки документов (без изменений)
     with gr.Row():
         test_input = gr.File(
-            label="📥 Проверяемая инструкция",
-            file_types=[".pdf", ".PDF", ".docx", ".DOCX"],
-            type="filepath",
-            elem_classes="compact-file"
+            label="📥 Проверяемая инструкция (TEST)",
+            file_types=[".pdf", ".docx"],
+            type="filepath"
         )
         ref_input = gr.File(
-            label="📘 Эталонная инструкция",
+            label="📘 Эталонная инструкция (REF)",
             file_types=[".pdf", ".docx"],
-            type="filepath",
-            elem_classes="compact-file"
+            type="filepath"
         )
         rec_input = gr.File(
-            label="📑 Рекомендации по заполнению",
-            file_types=[".pdf", ".PDF", ".docx", ".DOCX"],
-            type="filepath",
-            elem_classes="compact-file"
+            label="📑 Рекомендации",
+            file_types=[".pdf", ".docx"],
+            type="filepath"
         )
 
     tmpl_input = gr.Dropdown(
         label="📑 Шаблон отчёта",
         choices=templates,
-        value=templates[0] if templates else None,
-        interactive=True
+        value=templates[0] if templates else None
     )
 
-    output_file = gr.File(label="📤 DOCX-отчет")
+    gr.Markdown("---")
 
-    # --- Асинхронный обработчик кнопки ---
-    async def on_compare(t, r, c, tmpl):
+    # 2) Блок ручной разбивки + кнопка запуска начальной разбивки
+    gr.Markdown("### Шаг 1. Ручной контроль разбиения")
+    start_split_btn = gr.Button("▶ Запустить начальную разбивку на блоки", variant="primary")
+
+    with gr.Tabs():
+        with gr.Tab("Проверяемая инструкция (TEST)"):
+            editor_test = build_section_editor(
+                title="",
+                show_file_input=False
+            )
+        with gr.Tab("Эталонная инструкция (REF)"):
+            editor_ref = build_section_editor(
+                title="",
+                show_file_input=False
+            )
+
+    # Сокращения: TEST
+    t_states = editor_test["states"]
+    t_comps = editor_test["components"]
+
+    # Сокращения: REF
+    r_states = editor_ref["states"]
+    r_comps = editor_ref["components"]
+
+    # 3) Большая кнопка сформировать отчёт
+    gr.Markdown("---")
+    generate_btn = gr.Button("🚀 Сформировать отчёт", variant="primary", interactive=False)
+    output_file = gr.File(label="📤 Итоговый DOCX")
+
+    # ========================================================
+    # Начальная разбивка: заполняем оба editor из верхних upload
+    # ========================================================
+    def on_start_initial_split(test_path, ref_path, preview_test, preview_ref):
+        if not test_path:
+            raise gr.Error("Выберите файл TEST.")
+        if not ref_path:
+            raise gr.Error("Выберите файл REF.")
+
+        # --- TEST ---
+        md_t, lines_t = cached_extract(test_path)
+        pred_t = predict_boundaries_from_lines(lines_t)
+        man_t: List[int] = []
+        sections_t = split_by_line_boundaries(lines_t, pred_t)
+        df_sec_t = sections_to_preview_df(sections_t, int(preview_test))
+        win_t = 0
+        df_lines_t = build_lines_view_df(lines_t, man_t, pred_t, win_t)
+        reset_t = _reset_editor_approval_payload()
+
+        # --- REF ---
+        md_r, lines_r = cached_extract(ref_path)
+        pred_r = predict_boundaries_from_lines(lines_r)
+        man_r: List[int] = []
+        sections_r = split_by_line_boundaries(lines_r, pred_r)
+        df_sec_r = sections_to_preview_df(sections_r, int(preview_ref))
+        win_r = 0
+        df_lines_r = build_lines_view_df(lines_r, man_r, pred_r, win_r)
+        reset_r = _reset_editor_approval_payload()
+
+        # Возвращаем пачкой — в outputs строго по порядку
+        return (
+            # TEST states
+            md_t, lines_t, pred_t, man_t, sections_t, win_t,
+            # TEST components
+            md_t, df_lines_t, df_sec_t,
+            # TEST approval reset
+            *reset_t,
+
+            # REF states
+            md_r, lines_r, pred_r, man_r, sections_r, win_r,
+            # REF components
+            md_r, df_lines_r, df_sec_r,
+            # REF approval reset
+            *reset_r,
+        )
+
+    start_split_btn.click(
+        on_start_initial_split,
+        inputs=[
+            test_input,
+            ref_input,
+            t_comps["preview_lines"],
+            r_comps["preview_lines"],
+        ],
+        outputs=[
+            # TEST states
+            t_states["markdown_state"],
+            t_states["lines_state"],
+            t_states["predicted_state"],
+            t_states["manual_state"],
+            t_states["sections_state"],
+            t_states["window_start_state"],
+            # TEST components
+            t_comps["doc_view"],
+            t_comps["lines_table"],
+            t_comps["sections_table"],
+            # TEST approval reset
+            t_states["approved_state"],
+            t_states["final_blocks_state"],
+            t_states["final_sections_order_state"],
+            t_states["final_boundaries_state"],
+            t_comps["status"],
+
+            # REF states
+            r_states["markdown_state"],
+            r_states["lines_state"],
+            r_states["predicted_state"],
+            r_states["manual_state"],
+            r_states["sections_state"],
+            r_states["window_start_state"],
+            # REF components
+            r_comps["doc_view"],
+            r_comps["lines_table"],
+            r_comps["sections_table"],
+            # REF approval reset
+            r_states["approved_state"],
+            r_states["final_blocks_state"],
+            r_states["final_sections_order_state"],
+            r_states["final_boundaries_state"],
+            r_comps["status"],
+        ],
+        show_progress=True,
+    )
+
+    # ========================================================
+    # Активируем кнопку отчёта, только если обе подтверждены
+    # ========================================================
+    def enable_generate(a: bool, b: bool):
+        return gr.update(interactive=bool(a and b))
+
+    t_states["approved_state"].change(
+        enable_generate,
+        inputs=[t_states["approved_state"], r_states["approved_state"]],
+        outputs=[generate_btn],
+    )
+    r_states["approved_state"].change(
+        enable_generate,
+        inputs=[t_states["approved_state"], r_states["approved_state"]],
+        outputs=[generate_btn],
+    )
+
+    # ========================================================
+    # Генерация отчёта — строго по ручной разбивке TEST+REF
+    # ========================================================
+    async def on_generate(
+        test_path,
+        ref_path,
+        rec_path,
+        template_name,
+        a_test,
+        a_ref,
+        test_blocks,
+        ref_blocks,
+        sections_order,
+    ):
+        if not (a_test and a_ref):
+            raise gr.Error("Сначала подтвердите разбиение и для TEST, и для REF.")
+        if not test_blocks:
+            raise gr.Error("Нет утверждённых блоков TEST.")
+        if not ref_blocks:
+            raise gr.Error("Нет утверждённых блоков REF.")
+
+        if not test_path or not ref_path:
+            raise gr.Error("TEST/REF не выбраны в строке загрузки.")
+        if not rec_path:
+            raise gr.Error("Не выбраны рекомендации.")
+        if not template_name:
+            raise gr.Error("Не выбран шаблон отчёта.")
+
         return await generate_report_async(
-            t, r, c, tmpl,
+            test_path=test_path,
+            ref_path=ref_path,
+            rec_path=rec_path,
+            template_name=template_name,
             template_dir=TEMPLATE_DIR,
             output_dir=OUTPUT_DIR,
             provider=PROVIDER,
-            prefix=REPORT_PREFIX
+            prefix=REPORT_PREFIX,
+            # ключевое: утверждённые пользователем блоки
+            test_blocks=test_blocks,
+            ref_blocks=ref_blocks,
+            sections_order=sections_order,
         )
 
-    compare_btn = gr.Button("🔍 Сравнить и сформировать отчет")
-    compare_btn.click(
-        fn=on_compare,
-        inputs=[test_input, ref_input, rec_input, tmpl_input],
+    generate_btn.click(
+        on_generate,
+        inputs=[
+            test_input,
+            ref_input,
+            rec_input,
+            tmpl_input,
+            t_states["approved_state"],
+            r_states["approved_state"],
+            t_states["final_blocks_state"],
+            r_states["final_blocks_state"],
+            t_states["final_sections_order_state"],  # порядок берём из TEST
+        ],
         outputs=output_file,
-        show_progress=True
+        show_progress=True,
     )
 
-    # Разрешаем нескольким обработчикам выполняться параллельно и ограничиваем длину очереди
-    iface.queue(default_concurrency_limit=args.n_users, max_size=10)
-
-# --- Точка входа ---
+# ============================================================
+# Launch
+# ============================================================
 if __name__ == "__main__":
-    logger.info("Запуск Gradio-интерфейса...")
-    logger.info(f"Используемый провайдер LLM: {PROVIDER}")
-    logger.info(f"Папка с шаблонами: {TEMPLATE_DIR}")
-    logger.info(f"Папка для отчетов: {OUTPUT_DIR}")
-    logger.info(f"Префикс отчетов: {REPORT_PREFIX}")
-    logger.info(f"Доступные шаблоны: {templates}")
-
-    try:
-        iface.launch(
-            server_name=args.host,
-            server_port=args.port,
-            share=args.share
-        )
-        logger.info("Gradio-интерфейс запущен.")
-    except KeyboardInterrupt:
-        logger.info("Получен сигнал завершения (Ctrl+C), остановка сервера.")
-    except Exception as e:
-        logger.critical(f"Критическая ошибка при запуске Gradio-интерфейса: {e}", exc_info=True)
-        raise
+    logger.info("Запуск приложения")
+    app.queue(max_size=10).launch(
+        server_name=args.host,
+        server_port=args.port,
+        share=args.share
+    )

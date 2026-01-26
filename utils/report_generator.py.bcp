@@ -1,10 +1,12 @@
+
 import os
 import logging
 import traceback
 import asyncio
+import inspect
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 from difflib import get_close_matches
 from docx import Document
 
@@ -24,6 +26,9 @@ from utils.docx_writer import (
 from lv_parser import segment_text_semantic
 from ohlp_parser import split_ohlp_sections
 
+# ----------------------------
+# Module logger
+# ----------------------------
 logger = logging.getLogger(__name__)
 
 # ----------------------------
@@ -46,6 +51,7 @@ def load_cached_recommendations(rec_path: str) -> str:
 # ----------------------------
 # Helpers for section name cleaning & extraction
 # ----------------------------
+
 def _clean_section_name(s: str) -> str:
     """
     Очищает строку: убирает пробелы, звёздочки, кавычки и пр. мусор,
@@ -54,14 +60,14 @@ def _clean_section_name(s: str) -> str:
     if not s:
         return ""
     s = s.replace("\u00A0", " ")
-    s = re.sub(r"\*+", "", s)
-    s = re.sub(r"\s+", " ", s)
-    s = re.sub(r'^[\s\.\-–—«»"\'№]+', "", s)
-    s = re.sub(r'[\s\.\-–—«»"\'№]+$', "", s)
-    if s.endswith(">") and not s.startswith("<"):
-        s = "<" + s
-    if s.startswith("<") and ">" not in s[1:]:
-        s = s + ">"
+    s = re.sub(r'\*+', '', s)
+    s = re.sub(r'\s+', ' ', s)
+    s = re.sub(r'^[\s\.\-–—«»"\'№]+', '', s)
+    s = re.sub(r'[\s\.\-–—«»"\'№]+$', '', s)
+    if s.endswith('>') and not s.startswith('<'):
+        s = '<' + s
+    if s.startswith('<') and '>' not in s[1:]:
+        s = s + '>'
     return s.strip()
 
 
@@ -71,18 +77,18 @@ def extract_sections_from_recommendations(text: str) -> List[str]:
     заголовков (первая непустая строка каждого блока), очищенных от
     спецсимволов. Пропускает служебные секции и маркер %extra%.
     """
-    parts = re.split(r"%\s*split\s*%", text or "", flags=re.IGNORECASE)
+    parts = re.split(r'%\s*split\s*%', text or '', flags=re.IGNORECASE)
     sections: List[str] = []
     for part in parts:
-        block = (part or "").strip()
+        block = (part or '').strip()
         if not block:
             continue
-        if block.lower().startswith("рекомендации по составлению проекта общей характеристики"):
+        if block.lower().startswith('рекомендации по составлению проекта общей характеристики'):
             continue
-        if block.strip().lower() == "%extra%":
+        if block.strip().lower() == '%extra%':
             continue
         lines = block.splitlines()
-        first = ""
+        first = ''
         for ln in lines:
             if ln.strip():
                 first = ln.strip()
@@ -98,6 +104,7 @@ def extract_sections_from_recommendations(text: str) -> List[str]:
 # ----------------------------
 # Data containers
 # ----------------------------
+
 @dataclass
 class LoadedDocs:
     loader_test: DocumentLoader
@@ -110,7 +117,12 @@ class LoadedDocs:
 # ----------------------------
 # Core steps used by report generation
 # ----------------------------
-async def load_texts(test_path: str, ref_path: str, rec_path: str) -> LoadedDocs:
+
+async def load_texts(
+    test_path: str,
+    ref_path: str,
+    rec_path: str,
+) -> LoadedDocs:
     """Load texts concurrently in threads; recommendations via cache."""
     logger.info("Загрузка текстов…")
     loader_test = DocumentLoader(test_path)
@@ -122,8 +134,12 @@ async def load_texts(test_path: str, ref_path: str, rec_path: str) -> LoadedDocs
     )
     rec_text = await asyncio.to_thread(load_cached_recommendations, rec_path)
 
-    logger.info(f"TEST: {len(test_text)} chars, type={loader_test.doc_type}, drug={loader_test.drug_name!r}")
-    logger.info(f"REF:  {len(ref_text)} chars, type={loader_ref.doc_type}, drug={loader_ref.drug_name!r}")
+    logger.info(
+        f"TEST: {len(test_text)} chars, type={loader_test.doc_type}, drug={loader_test.drug_name!r}"
+    )
+    logger.info(
+        f"REF:  {len(ref_text)} chars, type={loader_ref.doc_type}, drug={loader_ref.drug_name!r}"
+    )
     logger.info(f"REC:  {len(rec_text)} chars")
 
     return LoadedDocs(loader_test, loader_ref, test_text, ref_text, rec_text)
@@ -134,61 +150,27 @@ async def extract_sections(rec_text: str) -> List[str]:
     return await asyncio.to_thread(extract_sections_from_recommendations, rec_text)
 
 
-def _align_blocks_to_sections(
-    target_sections: List[str],
-    source_blocks: Dict[str, str],
-    *,
-    cutoff: float = 0.7,
-) -> Dict[str, str]:
-    """
-    Приводит блоки к ключам target_sections через fuzzy-match по названиям разделов.
-    Это нужно, когда:
-      - test_blocks пришли из ручной разбивки (ключи другие),
-      - а ref_blocks/или рекомендации разбиты по "каноническим" названиям,
-      - но таблицу нужно заполнить строго по target_sections.
-    """
-    if not target_sections:
-        return {}
-
-    if not source_blocks:
-        return {sec: "" for sec in target_sections}
-
-    keys = list(source_blocks.keys())
-    aligned: Dict[str, str] = {}
-    for sec in target_sections:
-        m = get_close_matches(sec, keys, n=1, cutoff=cutoff)
-        aligned[sec] = source_blocks[m[0]] if m else ""
-    return aligned
-
-
-async def _split_test_or_ref(
-    *,
-    doc_type: str,
-    text: str,
-    sections: List[str],
-) -> Dict[str, str]:
-    """Split a single text into blocks depending on doc_type."""
-    if doc_type == "leaflet":
-        return await asyncio.to_thread(segment_text_semantic, text, sections)
-    return await asyncio.to_thread(split_ohlp_sections, text, sections)
-
-
 async def split_into_sections(
     *,
     doc_type: str,
     test_text: str,
     ref_text: str,
     rec_text: str,
-    sections_from_recs: List[str],
+    sections: List[str],
 ) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
-    """Split test/ref/rec texts into section blocks."""
+    """Split test/ref/rec texts into section blocks concurrently."""
     logger.info("Разбиение текстов по разделам…")
-
-    test_blocks, ref_blocks = await asyncio.gather(
-        _split_test_or_ref(doc_type=doc_type, text=test_text, sections=sections_from_recs),
-        _split_test_or_ref(doc_type=doc_type, text=ref_text, sections=sections_from_recs),
-    )
-    recs_blocks = await asyncio.to_thread(split_recommendations, rec_text, sections_from_recs)
+    if doc_type == "leaflet":
+        test_blocks, ref_blocks = await asyncio.gather(
+            asyncio.to_thread(segment_text_semantic, test_text, sections),
+            asyncio.to_thread(segment_text_semantic, ref_text, sections),
+        )
+    else:
+        test_blocks, ref_blocks = await asyncio.gather(
+            asyncio.to_thread(split_ohlp_sections, test_text, sections),
+            asyncio.to_thread(split_ohlp_sections, ref_text, sections),
+        )
+    recs_blocks = await asyncio.to_thread(split_recommendations, rec_text, sections)
     return test_blocks, ref_blocks, recs_blocks
 
 
@@ -207,21 +189,23 @@ async def check_recommendations(
     async def check_one(sec: str):
         actual_text = test_blocks.get(sec, "")
 
+        # ищем самое близкое название среди ключей recs_blocks
         matches = get_close_matches(sec, recs_blocks.keys(), n=1, cutoff=0.7)
         if not matches:
-            return sec, {"compliance": "not_complied", "comments": ""}
+            return sec, {'compliance': 'not_complied', 'comments': ''}
 
         rec_part = recs_blocks[matches[0]]
         if not rec_part.strip():
-            return sec, {"compliance": "not_complied", "comments": ""}
+            return sec, {'compliance': 'not_complied', 'comments': ''}
 
         async with sem:
             try:
+                # ⬇️ ВСЕГДА используем асинхронный LLM-вызов
                 result = await checker.check_recommends_async(rec_part, actual_text)
                 return sec, result
             except Exception as e:
                 logger.error(f"Ошибка при проверке рекомендаций для '{sec}': {e}")
-                return sec, {"compliance": "not_complied", "comments": f"Ошибка: {e}"}
+                return sec, {'compliance': 'not_complied', 'comments': f'Ошибка: {e}'}
 
     pairs = await asyncio.gather(*(check_one(sec) for sec in sections))
     return {sec: res for sec, res in pairs}
@@ -245,7 +229,7 @@ def write_recommendations_and_table(
     table_index: int = 2,
 ) -> None:
     logger.info("Вставка рекомендаций и заполнение таблицы…")
-
+    
     try:
         insert_recommendations(doc, recommendations)
     except Exception as e:
@@ -257,7 +241,7 @@ def write_recommendations_and_table(
             recommended_sections=sections,
             ref_blocks=ref_blocks,
             test_blocks=test_blocks,
-            table_index=table_index,
+            table_index=table_index
         )
     except Exception as e:
         logger.error(f"Ошибка заполнения таблицы сравнения: {e}")
@@ -295,6 +279,7 @@ def save_report(
 # ----------------------------
 # Main async API
 # ----------------------------
+
 async def generate_report_async(
     test_path: str,
     ref_path: str,
@@ -306,76 +291,27 @@ async def generate_report_async(
     prefix: str,
     *,
     concurrency: int = 5,
-    # ⬇️ НОВОЕ: ручная/утверждённая разбивка (если есть)
-    test_blocks: Optional[Dict[str, str]] = None,
-    ref_blocks: Optional[Dict[str, str]] = None,
-    sections_order: Optional[List[str]] = None,
 ) -> str:
-    """
-    Асинхронная генерация отчёта. Возвращает путь к итоговому .docx.
-
-    Если test_blocks/ref_blocks/sections_order переданы (утверждены пользователем),
-    то именно они имеют приоритет и используются для LLM-проверки и таблицы.
-    """
+    """Асинхронная генерация отчёта. Возвращает путь к итоговому .docx."""
     logger.info("=== Начало генерации отчёта ===")
     try:
         docs = await load_texts(test_path, ref_path, rec_path)
-
-        # Канонические разделы из рекомендаций (для split_recommendations и авто-сопоставлений)
-        rec_sections = await extract_sections(docs.rec_text)
-
+        sections = await extract_sections(docs.rec_text)
         doc = load_template(template_dir, template_name)
 
-        # Разбиваем рекомендации всегда по "канону" из рекомендаций
-        recs_blocks = await asyncio.to_thread(split_recommendations, docs.rec_text, rec_sections)
-
-        # 1) TEST blocks: ручные имеют приоритет
-        if test_blocks is None:
-            auto_test_blocks = await _split_test_or_ref(
-                doc_type=docs.loader_test.doc_type,
-                text=docs.test_text,
-                sections=rec_sections,
-            )
-            test_blocks_used = auto_test_blocks
-        else:
-            test_blocks_used = test_blocks
-
-        # 2) REF blocks: если не дали вручную — разбиваем автоматически
-        if ref_blocks is None:
-            auto_ref_blocks = await _split_test_or_ref(
-                doc_type=docs.loader_test.doc_type,
-                text=docs.ref_text,
-                sections=rec_sections,
-            )
-            ref_blocks_used = auto_ref_blocks
-        else:
-            ref_blocks_used = ref_blocks
-
-        # 3) Порядок разделов для отчёта:
-        #    если задан sections_order — используем его,
-        #    иначе — если test_blocks ручные, используем порядок их ключей,
-        #    иначе — канон из рекомендаций.
-        if sections_order:
-            out_sections = list(sections_order)
-        elif test_blocks is not None:
-            out_sections = list(test_blocks_used.keys())
-        else:
-            out_sections = list(rec_sections)
-
-        # 4) Выравниваем ключи test/ref под out_sections (чтобы таблица и LLM работали в едином пространстве ключей)
-        #    Если test_blocks пришли ручные (с другими заголовками), мы НЕ меняем их содержимое,
-        #    но приводим словарь к out_sections через fuzzy-match.
-        if list(test_blocks_used.keys()) != out_sections:
-            test_blocks_used = _align_blocks_to_sections(out_sections, test_blocks_used)
-
-        if list(ref_blocks_used.keys()) != out_sections:
-            ref_blocks_used = _align_blocks_to_sections(out_sections, ref_blocks_used)
+        test_blocks, ref_blocks, recs_blocks = await split_into_sections(
+            doc_type=docs.loader_test.doc_type,
+            test_text=docs.test_text,
+            ref_text=docs.ref_text,
+            rec_text=docs.rec_text,
+            sections=sections,
+        )
 
         checker = SectionChecker(api_provider=provider)
         recommendations = await check_recommendations(
             checker=checker,
-            sections=out_sections,
-            test_blocks=test_blocks_used,
+            sections=sections,
+            test_blocks=test_blocks,
             recs_blocks=recs_blocks,
             concurrency=concurrency,
         )
@@ -383,9 +319,9 @@ async def generate_report_async(
         write_recommendations_and_table(
             doc,
             recommendations=recommendations,
-            sections=out_sections,
-            ref_blocks=ref_blocks_used,
-            test_blocks=test_blocks_used,
+            sections=sections,
+            ref_blocks=ref_blocks,
+            test_blocks=test_blocks,
             table_index=2,
         )
 
@@ -403,10 +339,8 @@ async def generate_report_async(
             output_dir=output_dir,
             prefix=prefix,
         )
-
         logger.info("=== Генерация отчёта завершена ===")
         return output_path
-
     except Exception as e:
         logger.critical(f"Невозможно сгенерировать отчёт: {e}")
         logger.debug(traceback.format_exc())
