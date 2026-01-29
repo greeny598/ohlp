@@ -175,7 +175,7 @@ with gr.Blocks() as app:
         man_t: List[int] = []
         sections_t = split_by_line_boundaries(lines_t, pred_t)
         df_sec_t = sections_to_preview_df(sections_t)
-        df_lines_t = build_lines_view_df(lines_t, man_t, pred_t, 0)
+        df_lines_t = build_lines_view_df(lines_t, man_t, pred_t)
 
         # --- REF ---
         md_r, lines_r = cached_extract(ref_path)
@@ -183,7 +183,7 @@ with gr.Blocks() as app:
         man_r: List[int] = []
         sections_r = split_by_line_boundaries(lines_r, pred_r)
         df_sec_r = sections_to_preview_df(sections_r)
-        df_lines_r = build_lines_view_df(lines_r, man_r, pred_r, 0)
+        df_lines_r = build_lines_view_df(lines_r, man_r, pred_r)
 
         return (
             # TEST

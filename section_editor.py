@@ -1,5 +1,5 @@
 import re
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple
 
 import gradio as gr
 import pandas as pd
@@ -11,6 +11,8 @@ from ohlp_parser import HEADING_RE
 # =========================
 # Параметры UI
 # =========================
+# Раньше был viewport/window_start. Теперь мы показываем ВЕСЬ документ слева.
+# Оставляем константы на будущее (и чтобы не ломать совместимость при откате).
 WINDOW_RADIUS = 90
 WINDOW_SIZE = WINDOW_RADIUS * 2 + 1
 
@@ -115,12 +117,13 @@ def sections_to_preview_df(sections: List[Dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# ============================================================
+# ЛЕВАЯ ТАБЛИЦА: ВСЕ СТРОКИ ДОКУМЕНТА (НЕЗАВИСИМО ОТ ПРАВОЙ)
+# ============================================================
 def build_lines_view_df(
     lines: List[str],
     manual: List[int],
     predicted: List[int],
-    window_start: int,
-    window_size: int = WINDOW_SIZE,
 ) -> pd.DataFrame:
     if not lines:
         return pd.DataFrame({"№": [], "Текст": []})
@@ -128,17 +131,14 @@ def build_lines_view_df(
     mset = set(coerce_int_list(manual))
     pset = set(coerce_int_list(predicted))
 
-    start = max(0, int(window_start or 0))
-    end = min(len(lines), start + int(window_size))
-
     rows = []
-    for i in range(start, end):
+    for i, line in enumerate(lines):
         prefix = ""
         if i in mset:
             prefix = "🟢 "
         elif i in pset:
             prefix = "🟧 "
-        rows.append({"№": i, "Текст": f"{prefix}{lines[i]}"})
+        rows.append({"№": i, "Текст": f"{prefix}{line}"})
 
     return pd.DataFrame(rows)
 
@@ -176,31 +176,44 @@ def build_section_editor(
     TABLE_HEIGHT = 640
 
     with gr.Group() as root:
+        # --- CSS: гарантируем видимость кнопок + разные цвета + рамки ---
         gr.HTML("""
-        <style>
+<style>
+/* Компактность ряда с кнопками */
+.section-editor-controls { gap: 12px !important; align-items: center !important; }
 
-        /* 🟧 Пересобрать — авто */
-        .gr-button.orange-btn > button {
-            background-color: #ffe0b2 !important;
-            border: 1px solid #fb8c00 !important;
-            color: #5d4037 !important;
-        }
-        .gr-button.orange-btn > button:hover {
-            background-color: #ffd180 !important;
-        }
+/* Общий видимый стиль кнопок */
+.gr-button.editor-btn > button {
+    height: 44px !important;
+    font-weight: 700 !important;
+    font-size: 16px !important;
+    border-width: 2px !important;
+    border-style: solid !important;
+    border-radius: 10px !important;
+    box-shadow: 0 1px 0 rgba(0,0,0,0.06) !important;
+}
 
-        /* 🟢 Подтвердить — ручное */
-        .gr-button.green-btn > button {
-            background-color: #c8e6c9 !important;
-            border: 1px solid #43a047 !important;
-            color: #1b5e20 !important;
-        }
-        .gr-button.green-btn > button:hover {
-            background-color: #b2dfdb !important;
-        }
+/* 🟧 Пересобрать */
+.gr-button.orange-btn > button {
+    background-color: #ffe0b2 !important;
+    border-color: #fb8c00 !important;
+    color: #4e342e !important;
+}
+.gr-button.orange-btn > button:hover {
+    background-color: #ffd180 !important;
+}
 
-        </style>
-        """)
+/* 🟢 Подтвердить */
+.gr-button.green-btn > button {
+    background-color: #c8e6c9 !important;
+    border-color: #43a047 !important;
+    color: #1b5e20 !important;
+}
+.gr-button.green-btn > button:hover {
+    background-color: #b7dfb9 !important;
+}
+</style>
+""")
 
         if title:
             gr.Markdown(f"### {title}")
@@ -213,6 +226,8 @@ def build_section_editor(
         predicted_state = gr.State([])
         manual_state = gr.State([])
         sections_state = gr.State([])
+
+        # Оставляем для совместимости с main.py, но НЕ используем.
         window_start_state = gr.State(0)
 
         approved_state = gr.State(False)
@@ -223,20 +238,21 @@ def build_section_editor(
         status = gr.Markdown("")
 
         # --------- Controls ----------
-        with gr.Row():
-            # preview_lines = gr.Slider(...)   # 🔕 временно отключено
+        with gr.Row(elem_classes=["section-editor-controls"]):
+            # preview_lines = gr.Slider(...)   # 🔕 временно отключено (закомментировано, не удалено)
+
             split_btn = gr.Button(
                 "Пересобрать",
                 variant="secondary",
-                elem_classes=["orange-btn"]
+                elem_classes=["editor-btn", "orange-btn"],
             )
-
             approve_btn = gr.Button(
                 "Подтвердить",
                 variant="secondary",
-                elem_classes=["green-btn"]
+                elem_classes=["editor-btn", "green-btn"],
             )
 
+        # Совместимость с main.py (он может писать сюда md), но вкладку "просмотр" мы не показываем
         doc_view = gr.Markdown(value="", visible=False)
 
         with gr.Row():
@@ -281,22 +297,22 @@ def build_section_editor(
             sections = split_by_line_boundaries(lines, predicted)
             df_sections = sections_to_preview_df(sections)
 
-            window_start = 0
-            df_lines = build_lines_view_df(lines, manual, predicted, window_start)
+            # ЛЕВАЯ ТАБЛИЦА: ВСЕ СТРОКИ
+            df_lines = build_lines_view_df(lines, manual, predicted)
 
             return (
-                md, lines, predicted, manual, sections, window_start,
+                md, lines, predicted, manual, sections, 0,
                 md, df_lines, df_sections,
                 *_reset_approval()
             )
 
-        def on_line_select(manual, predicted, lines, window_start, evt: gr.SelectData):
+        def on_line_select(manual, predicted, lines, evt: gr.SelectData):
             manual = coerce_int_list(manual)
             predicted = coerce_int_list(predicted)
             lines = lines or []
 
-            row = evt.index[0]
-            orig_row = window_start + row
+            # Теперь индекс строки = индекс в документе (без window_start)
+            orig_row = int(evt.index[0])
 
             mset = set(manual)
             pset = set(predicted)
@@ -311,7 +327,7 @@ def build_section_editor(
             manual_new = sorted(mset)
             predicted_new = sorted(pset)
 
-            df = build_lines_view_df(lines, manual_new, predicted_new, window_start)
+            df = build_lines_view_df(lines, manual_new, predicted_new)
             return manual_new, predicted_new, df, *_reset_approval()
 
         def on_split(manual, predicted, lines):
@@ -319,12 +335,7 @@ def build_section_editor(
             sections = split_by_line_boundaries(lines or [], combined)
             return sections_to_preview_df(sections), sections, predicted, *_reset_approval()
 
-        def on_section_select(sections, manual, predicted, lines, evt: gr.SelectData):
-            row = evt.index[0]
-            header_index = int(sections[row].get("header_index", 0))
-            window_start = max(0, header_index - WINDOW_RADIUS)
-            df = build_lines_view_df(lines or [], manual or [], predicted or [], window_start)
-            return df, window_start
+        # ВАЖНО: мы специально НЕ делаем sections_table.select(...) чтобы правая не влияла на левую
 
         def on_approve(manual, predicted, lines):
             combined = sorted(set(coerce_int_list(manual)) | set(coerce_int_list(predicted)))
@@ -346,7 +357,7 @@ def build_section_editor(
 
         lines_table.select(
             on_line_select,
-            inputs=[manual_state, predicted_state, lines_state, window_start_state],
+            inputs=[manual_state, predicted_state, lines_state],
             outputs=[
                 manual_state, predicted_state, lines_table,
                 approved_state, final_blocks_state, final_sections_order_state, final_boundaries_state, status
@@ -360,12 +371,6 @@ def build_section_editor(
                 sections_table, sections_state, predicted_state,
                 approved_state, final_blocks_state, final_sections_order_state, final_boundaries_state, status
             ],
-        )
-
-        sections_table.select(
-            on_section_select,
-            inputs=[sections_state, manual_state, predicted_state, lines_state],
-            outputs=[lines_table, window_start_state],
         )
 
         approve_btn.click(
@@ -382,7 +387,7 @@ def build_section_editor(
             "predicted_state": predicted_state,
             "manual_state": manual_state,
             "sections_state": sections_state,
-            "window_start_state": window_start_state,
+            "window_start_state": window_start_state,  # оставлено для совместимости
             "approved_state": approved_state,
             "final_blocks_state": final_blocks_state,
             "final_sections_order_state": final_sections_order_state,
