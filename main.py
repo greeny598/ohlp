@@ -7,7 +7,7 @@ from typing import Dict, Tuple, List
 import gradio as gr
 
 from utils.report_generator import generate_report_async
-from section_editor import (
+from utils.section_editor import (
     build_section_editor,
     extract_markdown_and_lines,
     predict_boundaries_from_lines,
@@ -91,7 +91,7 @@ def _badges(a_test: bool, a_ref: bool) -> str:
 # UI
 # ============================================================
 with gr.Blocks() as app:
-    gr.Markdown("## 📄 Сравнение инструкций — ручной контроль разбиения")
+    gr.Markdown("## 📄 Сравнение инструкций с ручным контролем структуры документа")
 
     # --------------------------------------------------------
     # 1. Загрузка документов
@@ -124,9 +124,9 @@ with gr.Blocks() as app:
     # --------------------------------------------------------
     # 2. Ручная разбивка
     # --------------------------------------------------------
-    gr.Markdown("### Шаг 1. Ручной контроль разбиения")
+    gr.Markdown("### Ручной контроль разделения документа на разделы")
     start_split_btn = gr.Button(
-        "▶ Запустить начальную разбивку на блоки",
+        "▶ Запустить автоматический анализ структуры документа",
         variant="secondary",
     )
 
@@ -154,7 +154,7 @@ with gr.Blocks() as app:
     gr.Markdown("---")
     generate_btn = gr.Button(
         "🚀 Сформировать отчёт",
-        variant="primary",
+        variant="secondary",
         interactive=False,
     )
     badges_line = gr.Markdown(_badges(False, False))
@@ -165,9 +165,9 @@ with gr.Blocks() as app:
     # ========================================================
     def on_start_initial_split(test_path, ref_path):
         if not test_path:
-            raise gr.Error("Выберите файл TEST.")
+            raise gr.Error("Выберите проверяемый документ.")
         if not ref_path:
-            raise gr.Error("Выберите файл REF.")
+            raise gr.Error("Выберите референтный документ.")
 
         # --- TEST ---
         md_t, lines_t = cached_extract(test_path)

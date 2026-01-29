@@ -176,45 +176,23 @@ def build_section_editor(
     TABLE_HEIGHT = 640
 
     with gr.Group() as root:
-        # --- CSS: гарантируем видимость кнопок + разные цвета + рамки ---
         gr.HTML("""
-<style>
-/* Компактность ряда с кнопками */
-.section-editor-controls { gap: 12px !important; align-items: center !important; }
+            <style>
+            #btn-split button,
+            #btn-split {
+                border: 1px solid #000 !important;
+                border-radius: 6px !important;
+            }
 
-/* Общий видимый стиль кнопок */
-.gr-button.editor-btn > button {
-    height: 44px !important;
-    font-weight: 700 !important;
-    font-size: 16px !important;
-    border-width: 2px !important;
-    border-style: solid !important;
-    border-radius: 10px !important;
-    box-shadow: 0 1px 0 rgba(0,0,0,0.06) !important;
-}
+            #btn-approve button,
+            #btn-approve {
+                border: 1px solid #000 !important;
+                border-radius: 6px !important;
+            }
+            </style>
+            """)
 
-/* 🟧 Пересобрать */
-.gr-button.orange-btn > button {
-    background-color: #ffe0b2 !important;
-    border-color: #fb8c00 !important;
-    color: #4e342e !important;
-}
-.gr-button.orange-btn > button:hover {
-    background-color: #ffd180 !important;
-}
-
-/* 🟢 Подтвердить */
-.gr-button.green-btn > button {
-    background-color: #c8e6c9 !important;
-    border-color: #43a047 !important;
-    color: #1b5e20 !important;
-}
-.gr-button.green-btn > button:hover {
-    background-color: #b7dfb9 !important;
-}
-</style>
-""")
-
+        
         if title:
             gr.Markdown(f"### {title}")
 
@@ -244,13 +222,15 @@ def build_section_editor(
             split_btn = gr.Button(
                 "Пересобрать",
                 variant="secondary",
-                elem_classes=["editor-btn", "orange-btn"],
+                elem_id="btn-split",
             )
+
             approve_btn = gr.Button(
                 "Подтвердить",
-                variant="secondary",
-                elem_classes=["editor-btn", "green-btn"],
+                variant="primary",
+                elem_id="btn-approve",
             )
+
 
         # Совместимость с main.py (он может писать сюда md), но вкладку "просмотр" мы не показываем
         doc_view = gr.Markdown(value="", visible=False)
