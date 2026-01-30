@@ -315,6 +315,321 @@ def _write_fragments(paragraph, frags: List[Tuple[str, str, Tuple[int, int, int]
             
 
 
+
+# =========================
+# Markdown tables -> DOCX tables (шаг 1: простой парсер)
+# =========================
+_MD_TABLE_SEP_RE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$")
+
+def _split_md_blocks(text: str) -> List[Tuple[str, Any]]:
+    """Разбивает текст на блоки ('text', str) и ('table', List[List[str]]).
+    Поддерживает простые markdown-таблицы вида:
+      | A | B |
+      |---|---|
+      | 1 | 2 |
+    Всё, что между таблицами — один 'text' блок.
+    """
+    if not text:
+        return []
+    lines = text.splitlines()
+    blocks: List[Tuple[str, Any]] = []
+    buf: List[str] = []
+    i = 0
+
+    def flush_buf():
+        nonlocal buf
+        chunk = "\n".join(buf).strip()
+        if chunk:
+            blocks.append(("text", chunk))
+        buf = []
+
+    while i < len(lines):
+        line = lines[i]
+        # кандидат на заголовок таблицы: содержит '|'
+        if "|" in line and i + 1 < len(lines) and _MD_TABLE_SEP_RE.match(lines[i + 1] or ""):
+            # начинаем таблицу
+            flush_buf()
+            table_lines = [line, lines[i + 1]]
+            i += 2
+            # строки таблицы до первого пустого/непохожего
+            while i < len(lines):
+                ln = lines[i]
+                if not ln.strip():
+                    break
+                if "|" not in ln:
+                    break
+                table_lines.append(ln)
+                i += 1
+            table = _parse_md_table_lines(table_lines)
+            if table:
+                blocks.append(("table", table))
+            else:
+                # если парсер не смог — возвращаем как текст
+                blocks.append(("text", "\n".join(table_lines)))
+            continue
+
+        buf.append(line)
+        i += 1
+
+    flush_buf()
+    return blocks
+
+
+def _parse_md_table_lines(table_lines: List[str]) -> List[List[str]]:
+    """Парсит markdown-таблицу из строк (header + sep + rows)."""
+    if len(table_lines) < 2:
+        return []
+    header = table_lines[0]
+    # table_lines[1] — разделитель
+    body_lines = table_lines[2:] if len(table_lines) > 2 else []
+
+    def split_row(row: str) -> List[str]:
+        s = row.strip()
+        # убрать крайние |
+        if s.startswith("|"):
+            s = s[1:]
+        if s.endswith("|"):
+            s = s[:-1]
+        # простое разделение
+        return [c.strip() for c in s.split("|")]
+
+    rows: List[List[str]] = []
+    rows.append(split_row(header))
+    for bl in body_lines:
+        rows.append(split_row(bl))
+
+    # нормализация: одинаковое число колонок
+    max_cols = max((len(r) for r in rows), default=0)
+    if max_cols == 0:
+        return []
+    norm = []
+    for r in rows:
+        rr = r[:max_cols] + [""] * (max_cols - len(r))
+        norm.append(rr)
+    return norm
+
+
+def _clear_cell(cell) -> None:
+    """Аккуратно очищает ячейку от текста (таблицы python-docx в ячейке удалять сложно,
+    но для нашего сценария мы создаём новую строку и пишем с нуля).
+    """
+    cell.text = ""
+    # удалить лишние параграфы
+    while len(cell.paragraphs) > 1:
+        p = cell.paragraphs[-1]
+        p._element.getparent().remove(p._element)
+
+
+
+def _set_table_borders_dotted(table) -> None:
+    """
+    Делает границы таблицы явно видимыми пунктиром (dotted).
+    Применяется ко всей таблице (tblBorders).
+    """
+    tbl = table._tbl
+    tblPr = tbl.tblPr
+    # найти или создать элемент tblBorders
+    tblBorders = tblPr.find(qn("w:tblBorders"))
+    if tblBorders is None:
+        tblBorders = OxmlElement("w:tblBorders")
+        tblPr.append(tblBorders)
+
+    def _border(tag: str):
+        el = tblBorders.find(qn(f"w:{tag}"))
+        if el is None:
+            el = OxmlElement(f"w:{tag}")
+            tblBorders.append(el)
+        el.set(qn("w:val"), "dotted")
+        el.set(qn("w:sz"), "6")      # толщина
+        el.set(qn("w:space"), "0")
+        el.set(qn("w:color"), "000000")
+
+    for t in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        _border(t)
+
+
+def _write_rich_with_tables(
+    cell_ref,
+    cell_test,
+    ref_text: str,
+    test_text: str,
+    default_size_pt: int = 12,
+) -> None:
+    """Пишет в ячейки ref/test смешанный контент: текст + markdown-таблицы.
+    Для текста — посимвольный diff (как раньше), для таблиц — diff по ячейкам, если структура совпадает.
+    Фоллбек: если таблицы не совпадают по размеру — вставляем как plain text в таблицу без подсветки.
+    """
+    ref_blocks = _split_md_blocks(ref_text or "")
+    test_blocks = _split_md_blocks(test_text or "")
+
+    # выравнивание блоков по порядку (простое, без умной сопоставлялки)
+    n = max(len(ref_blocks), len(test_blocks))
+
+    _clear_cell(cell_ref)
+    _clear_cell(cell_test)
+
+    # начинаем писать в первый параграф
+    pref = cell_ref.paragraphs[0]
+    ptest = cell_test.paragraphs[0]
+
+    def ensure_new_paragraph(cell, is_first: bool):
+        if is_first:
+            return cell.paragraphs[0]
+        return cell.add_paragraph()
+
+    def _maybe_parse_table_from_text(text_block: str):
+        """Если текстовый блок на самом деле содержит markdown-таблицу,
+        пытаемся распарсить **первую** таблицу и вернуть её как матрицу.
+
+        Возвращает: (table_rows, remainder_text)
+          - table_rows: List[List[str]] или []
+          - remainder_text: текст без строк таблицы (если нашли)
+
+        Это мягкий фоллбек, чтобы ситуация "слева таблица, справа пустая сетка"
+        превращалась в "слева таблица, справа хотя бы текст" или даже таблица.
+        """
+        txt = (text_block or "").strip("\n")
+        if not txt:
+            return [], ""
+        lines = txt.splitlines()
+        # ищем начало markdown-таблицы (строка с | и следующая разделительная)
+        for i in range(len(lines) - 1):
+            if "|" not in lines[i]:
+                continue
+            if re.match(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$", lines[i + 1]):
+                # собираем до тех пор, пока строки похожи на таблицу
+                chunk = [lines[i], lines[i + 1]]
+                j = i + 2
+                while j < len(lines) and ("|" in lines[j]):
+                    chunk.append(lines[j])
+                    j += 1
+                try:
+                    table_rows = _parse_md_table_lines(chunk)
+                except Exception:
+                    table_rows = []
+                if table_rows:
+                    remainder = (lines[:i] + lines[j:])
+                    return table_rows, "\n".join(remainder).strip()
+        return [], txt
+
+    for idx in range(n):
+        rblk = ref_blocks[idx] if idx < len(ref_blocks) else ("text", "")
+        tblk = test_blocks[idx] if idx < len(test_blocks) else ("text", "")
+
+        rtype, rdata = rblk
+        ttype, tdata = tblk
+
+        if rtype == "table" or ttype == "table":
+            # Вставляем таблицы в каждую ячейку отдельно.
+            # Если с одной стороны таблица, а с другой — текст, пытаемся
+            # распарсить таблицу из текста (мягкий фоллбек).
+            rtable = rdata if rtype == "table" else []
+            ttable = tdata if ttype == "table" else []
+
+            # если "таблица" не распознана с одной стороны, но там текст — попробуем извлечь
+            r_remainder = ""
+            t_remainder = ""
+            if not rtable and rtype != "table":
+                # rdata — текст
+                rtable, r_remainder = _maybe_parse_table_from_text(rdata if isinstance(rdata, str) else "")
+            if not ttable and ttype != "table":
+                ttable, t_remainder = _maybe_parse_table_from_text(tdata if isinstance(tdata, str) else "")
+
+            r_rows = len(rtable)
+            r_cols = len(rtable[0]) if r_rows else 0
+            t_rows = len(ttable)
+            t_cols = len(ttable[0]) if t_rows else 0
+
+            rows = max(r_rows, t_rows)
+            cols = max(r_cols, t_cols)
+
+            # если таблица всё ещё не распознана — пишем как текстовый блок с diff
+            if rows == 0 or cols == 0:
+                # fallback: пишем как текстовый блок с diff
+                rtxt = (r_remainder or "")
+                ttxt = (t_remainder or "")
+                if rtable:
+                    rtxt = ("\n".join(["\t".join(r) for r in (rtable or [])]) + "\n\n" + rtxt).strip()
+                if ttable:
+                    ttxt = ("\n".join(["\t".join(r) for r in (ttable or [])]) + "\n\n" + ttxt).strip()
+                fr, ft = highlight_differences(rtxt, ttxt)
+                pr = ensure_new_paragraph(cell_ref, is_first=(idx == 0))
+                pt = ensure_new_paragraph(cell_test, is_first=(idx == 0))
+                _write_fragments(pr, fr, default_size_pt=default_size_pt)
+                _write_fragments(pt, ft, default_size_pt=default_size_pt)
+                continue
+
+            # добавляем небольшой отступ перед таблицей, если уже есть текст
+            if idx > 0:
+                cell_ref.add_paragraph("")
+                cell_test.add_paragraph("")
+
+            # ВАЖНО: если таблица есть только с одной стороны, не создаём "пустую сетку" на другой.
+            # Вместо этого показываем там исходный текст (с подсветкой отличий относительно "плоского" представления таблицы).
+            has_ref_tbl = rows > 0 and cols > 0 and r_rows > 0 and r_cols > 0
+            has_test_tbl = rows > 0 and cols > 0 and t_rows > 0 and t_cols > 0
+
+            ref_tbl = cell_ref.add_table(rows=rows, cols=cols) if has_ref_tbl else None
+            test_tbl = cell_test.add_table(rows=rows, cols=cols) if has_test_tbl else None
+
+            if ref_tbl is not None:
+                _set_table_borders_dotted(ref_tbl)
+            if test_tbl is not None:
+                _set_table_borders_dotted(test_tbl)
+
+            # ширины/стиль можно будет настроить позже; сейчас — безопасный шаг 1
+            for ri in range(rows):
+                for ci in range(cols):
+                    rtxt = ""
+                    ttxt = ""
+                    if ri < r_rows and ci < r_cols:
+                        rtxt = rtable[ri][ci]
+                    if ri < t_rows and ci < t_cols:
+                        ttxt = ttable[ri][ci]
+
+                    # Всегда делаем посимвольный diff в ячейках.
+                    fr, ft = highlight_differences(rtxt, ttxt)
+
+                    if ref_tbl is not None:
+                        pr = ref_tbl.cell(ri, ci).paragraphs[0]
+                        pr.text = ""
+                        _write_fragments(pr, fr, default_size_pt=default_size_pt)
+                    if test_tbl is not None:
+                        pt = test_tbl.cell(ri, ci).paragraphs[0]
+                        pt.text = ""
+                        _write_fragments(pt, ft, default_size_pt=default_size_pt)
+
+            # если таблица была только с одной стороны — выводим контент второй стороны как текст (без пустой сетки)
+            if ref_tbl is not None and test_tbl is None:
+                # Плоское представление ref-таблицы vs test remainder/text
+                flat_ref = "\n".join(["\t".join(r) for r in (rtable or [])]).strip()
+                flat_test = (t_remainder or "").strip()
+                fr, ft = highlight_differences(flat_ref, flat_test)
+                pt = ensure_new_paragraph(cell_test, is_first=(idx == 0))
+                pt.text = ""
+                _write_fragments(pt, ft, default_size_pt=default_size_pt)
+            elif test_tbl is not None and ref_tbl is None:
+                flat_test = "\n".join(["\t".join(r) for r in (ttable or [])]).strip()
+                flat_ref = (r_remainder or "").strip()
+                fr, ft = highlight_differences(flat_ref, flat_test)
+                pr = ensure_new_paragraph(cell_ref, is_first=(idx == 0))
+                pr.text = ""
+                _write_fragments(pr, fr, default_size_pt=default_size_pt)
+
+            continue
+
+        # оба текстовые — делаем посимвольный diff на уровне блока
+        rtxt = rdata if isinstance(rdata, str) else ""
+        ttxt = tdata if isinstance(tdata, str) else ""
+        fr, ft = highlight_differences(rtxt, ttxt)
+
+        pr = ensure_new_paragraph(cell_ref, is_first=(idx == 0))
+        pt = ensure_new_paragraph(cell_test, is_first=(idx == 0))
+        pr.text = ""
+        pt.text = ""
+        _write_fragments(pr, fr, default_size_pt=default_size_pt)
+        _write_fragments(pt, ft, default_size_pt=default_size_pt)
+
 def fill_comparison_table(doc: Document,
                           recommended_sections: List[str],
                           ref_blocks: Dict[str, str],
@@ -466,20 +781,18 @@ def fill_comparison_table(doc: Document,
         # ==========================================================================
         row3 = table.add_row()
 
-        # REF TEXT
+        # REF/TST TEXT + TABLES (Шаг 1: markdown-таблицы)
         cell_ref_body = row3.cells[0]
-        cell_ref_body.text = ""
-        p_ref_body = cell_ref_body.paragraphs[0]
-        _write_fragments(p_ref_body, ref_frags)
+        cell_test_body = row3.cells[1] if len(row3.cells) > 1 else None
 
-        # TEST TEXT
-        if len(row3.cells) > 1:
-            cell_test_body = row3.cells[1]
-            cell_test_body.text = ""
-            p_test_body = cell_test_body.paragraphs[0]
-            _write_fragments(p_test_body, test_frags)
-
-    # -----------------------------------------
+        if cell_test_body is not None:
+            _write_rich_with_tables(cell_ref_body, cell_test_body, ref_body, test_body)
+        else:
+            # fallback: если таблица сравнения вдруг одноколоночная
+            cell_ref_body.text = ""
+            p_ref_body = cell_ref_body.paragraphs[0]
+            _write_fragments(p_ref_body, ref_frags)
+# -----------------------------------------
     # 4. Дополнительные разделы (не нашедшие секцию в эталоне)
     # -----------------------------------------
     extras_total = max(len(ref_extras), len(test_extras))
