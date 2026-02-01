@@ -78,10 +78,19 @@ def split_by_line_boundaries(lines: List[str], boundaries: List[int]) -> List[Di
         return []
 
     b = sorted(set(coerce_int_list(boundaries)))
+
+    # Если границ вообще нет — fallback: всё как один блок от начала
     if not b:
         b = [0]
+
+    # Раньше: всегда добавляли 0, из-за чего "ОБЩАЯ ХАРАКТЕРИСТИКА ..." становилась заголовком блока.
+    # Теперь: добавляем 0 ТОЛЬКО если первая строка выглядит как нумерованный заголовок.
     if b[0] != 0:
-        b = [0] + b
+        first_line = (lines[0] or "").lstrip()
+        starts_with_digit = bool(first_line) and first_line[0].isdigit()
+        if starts_with_digit:
+            b = [0] + b
+        # иначе — оставляем преамбулу вне блоков и начинаем с первой найденной границы (обычно "1. ...")
 
     sections: List[Dict[str, Any]] = []
     for k, start in enumerate(b):
@@ -89,7 +98,9 @@ def split_by_line_boundaries(lines: List[str], boundaries: List[int]) -> List[Di
         header = lines[start].strip()
         body = "\n".join(lines[start + 1:end]).strip()
         sections.append({"header_index": start, "Заголовок": header, "Текст": body})
+
     return sections
+
 
 
 def make_preview(text: str, n_lines: int = 6) -> str:

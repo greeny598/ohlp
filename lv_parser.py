@@ -22,6 +22,108 @@ from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# ============================ ПРОСТАЯ НАРЕЗКА ПО ЗАГОЛОВКАМ (LV) ============================
+
+# Заголовки ЛВ обычно пронумерованы 1..6 и начинаются с "N. "
+# Учитываем NBSP между номером и текстом.
+LV_HEADING_RE = re.compile(r"^\s*(?P<num>[1-6])\s*\.\s*(?P<title>\S.*)$")
+
+def _norm_spaces(s: str) -> str:
+    return _normalize_nbsp(s or "").strip()
+
+def _canon_section_by_num(sections: List[str], num: str) -> Optional[str]:
+    """Возвращает каноническое название раздела из списка sections по номеру (1..6)."""
+    if not sections:
+        return None
+    pref = f"{num}."
+    for s in sections:
+        ss = _norm_spaces(s)
+        if ss.startswith(pref):
+            return s
+    return None
+
+def split_leaflet_sections_simple(text: str, sections: List[str]) -> Dict[str, str]:
+    """
+    Простая и предсказуемая нарезка листка-вкладыша на разделы по заголовкам вида '1. ...' ... '6. ...'.
+    В отличие от segment_text_semantic(), НЕ делает семантических эвристик: только номера/заголовки.
+
+    Возвращает dict: {<канонический заголовок из sections>: <текст раздела>}.
+    Если конкретный раздел не найден — ключ всё равно будет присутствовать с пустой строкой.
+    """
+    text = _normalize_nbsp(text or "")
+    text = _strip_toc_block(text)  # убираем оглавление «Содержание...», чтобы пункты 1..6 не считались заголовками
+    raw_lines = text.splitlines()
+    lines = [_norm_spaces(ln) for ln in raw_lines]
+
+    # границы (индексы строк), где начинается очередной раздел
+    boundaries: List[int] = []
+    headers: Dict[int, Tuple[str, str]] = {}  # idx -> (num, header_line)
+
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        if not ln:
+            i += 1
+            continue
+
+        m = LV_HEADING_RE.match(ln)
+        if m:
+            num = m.group("num")
+            boundaries.append(i)
+            headers[i] = (num, ln)
+            i += 1
+            continue
+
+        # вариант: строка = '1.' (без текста), а сам заголовок в следующей строке
+        m2 = re.match(r"^\s*(?P<num>[1-6])\s*\.\s*$", ln)
+        if m2:
+            num = m2.group("num")
+            # ищем следующую непустую строку как заголовок
+            j = i + 1
+            while j < len(lines) and not lines[j]:
+                j += 1
+            header_line = f"{num}. {lines[j]}" if j < len(lines) else f"{num}."
+            boundaries.append(i)
+            headers[i] = (num, header_line)
+            i = j + 1
+            continue
+
+        i += 1
+
+    boundaries = sorted(set(boundaries))
+
+    # Если ничего не нашли — fallback: вернуть весь текст одним блоком (под первым разделом, если есть)
+    if not boundaries:
+        out: Dict[str, str] = {}
+        if sections:
+            out[sections[0]] = text.strip()
+            for s in sections[1:]:
+                out[s] = ""
+        else:
+            out["Без названия"] = text.strip()
+        return out
+
+    # собираем куски
+    out: Dict[str, str] = {}
+    for k, start in enumerate(boundaries):
+        end = boundaries[k + 1] if k + 1 < len(boundaries) else len(lines)
+
+        num, header_line = headers.get(start, ("", lines[start]))
+        canon = _canon_section_by_num(sections, num) if num else None
+        key = canon or header_line
+
+        # тело — оригинальные строки (raw_lines) между start+1..end-1, чтобы не терять форматирование строк
+        body = "\n".join(raw_lines[start + 1:end]).strip()
+        out[key] = body
+
+    # гарантируем присутствие всех канонических разделов из recommendations
+    for s in sections or []:
+        if s not in out:
+            out[s] = ""
+
+    return out
+
+
 # ============================ НОРМАЛИЗАЦИЯ ============================
 
 def _normalize_nbsp(s: str) -> str:
@@ -266,24 +368,3 @@ def segment_text_semantic(raw_text: str, sections_list: List[str]) -> Dict[str, 
         out[sec] = by_num.get(pos, "").strip()
 
     return out
-
-# ============================ ФАСАД ДЛЯ ТРЁХ ТЕКСТОВ ============================
-
-def segment_texts(
-    test_text: str,
-    ref_text: str,
-    rec_text: Optional[str],
-    sections: List[str],
-    split_recommendations_func=None,
-) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
-    """
-    Режет TEST/REF этим сегментером. Рекомендации (если надо) — через вашу функцию split_recommendations.
-    Возвращает (test_blocks, ref_blocks, recs_blocks).
-    """
-    test_blocks = segment_text_semantic(test_text, sections)
-    ref_blocks = segment_text_semantic(ref_text, sections)
-    if split_recommendations_func is not None and rec_text is not None:
-        recs_blocks = split_recommendations_func(rec_text, sections)
-    else:
-        recs_blocks = {sec: "" for sec in sections}
-    return test_blocks, ref_blocks, recs_blocks
