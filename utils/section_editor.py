@@ -7,16 +7,6 @@ import pandas as pd
 from utils.document_loader import DocumentLoader
 from ohlp_parser import HEADING_RE
 
-
-# =========================
-# Параметры UI
-# =========================
-# Раньше был viewport/window_start. Теперь мы показываем ВЕСЬ документ слева.
-# Оставляем константы на будущее (и чтобы не ломать совместимость при откате).
-WINDOW_RADIUS = 90
-WINDOW_SIZE = WINDOW_RADIUS * 2 + 1
-
-
 # =========================
 # Извлечение markdown и строк
 # =========================
@@ -216,9 +206,6 @@ def build_section_editor(
         manual_state = gr.State([])
         sections_state = gr.State([])
 
-        # Оставляем для совместимости с main.py, но НЕ используем.
-        window_start_state = gr.State(0)
-
         approved_state = gr.State(False)
         final_blocks_state = gr.State({})
         final_sections_order_state = gr.State([])
@@ -292,7 +279,7 @@ def build_section_editor(
             df_lines = build_lines_view_df(lines, manual, predicted)
 
             return (
-                md, lines, predicted, manual, sections, 0,
+                md, lines, predicted, manual, sections,
                 md, df_lines, df_sections,
                 *_reset_approval()
             )
@@ -378,7 +365,6 @@ def build_section_editor(
             "predicted_state": predicted_state,
             "manual_state": manual_state,
             "sections_state": sections_state,
-            "window_start_state": window_start_state,  # оставлено для совместимости
             "approved_state": approved_state,
             "final_blocks_state": final_blocks_state,
             "final_sections_order_state": final_sections_order_state,

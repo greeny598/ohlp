@@ -2,6 +2,7 @@ import os
 import glob
 import argparse
 import logging
+from logging.handlers import RotatingFileHandler
 from typing import Dict, Tuple, List
 
 import gradio as gr
@@ -19,11 +20,28 @@ from utils.section_editor import (
 # ============================================================
 # Логирование
 # ============================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("app.log", encoding="utf-8")]
-)
+def setup_logging():
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+    # файл (ротация)
+    fh = RotatingFileHandler("app.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+    fh.setFormatter(fmt)
+    fh.setLevel(logging.INFO)
+
+    # консоль
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+    sh.setLevel(logging.INFO)
+
+    # важно: очистить старые handlers, чтобы не было дублей/конфликтов
+    root.handlers.clear()
+    root.addHandler(fh)
+    root.addHandler(sh)
+
+setup_logging()
 logger = logging.getLogger(__name__)
 
 # ============================================================
@@ -187,12 +205,12 @@ with gr.Blocks() as app:
 
         return (
             # TEST
-            md_t, lines_t, pred_t, man_t, sections_t, 0,
+            md_t, lines_t, pred_t, man_t, sections_t,
             md_t, df_lines_t, df_sec_t,
             *_reset_editor_approval_payload(),
 
             # REF
-            md_r, lines_r, pred_r, man_r, sections_r, 0,
+            md_r, lines_r, pred_r, man_r, sections_r,
             md_r, df_lines_r, df_sec_r,
             *_reset_editor_approval_payload(),
         )
@@ -207,7 +225,6 @@ with gr.Blocks() as app:
             t_states["predicted_state"],
             t_states["manual_state"],
             t_states["sections_state"],
-            t_states["window_start_state"],
             t_comps["doc_view"],
             t_comps["lines_table"],
             t_comps["sections_table"],
@@ -223,7 +240,6 @@ with gr.Blocks() as app:
             r_states["predicted_state"],
             r_states["manual_state"],
             r_states["sections_state"],
-            r_states["window_start_state"],
             r_comps["doc_view"],
             r_comps["lines_table"],
             r_comps["sections_table"],

@@ -94,12 +94,7 @@ def highlight_differences(a: str, b: str,
             if tag in ('replace', 'insert'):
                 res_b.append(('highlight', tb, color_b))
     return res_a, res_b
-    
-def headers_equal(a: str, b: str) -> bool:
-    if a is None or b is None:
-        return False
-    return a.strip() == b.strip()
-    
+       
 def _norm_header_simple(s: str) -> str:
     if not s:
         return ""
@@ -250,41 +245,6 @@ def _clean_section_name(s: str) -> str:
     # символы в конце
     s = re.sub(r'[\s\*<>"«»\.\-–—\u00A0]+$', '', s)
     return s.strip()
-
-def _norm_header_for_diff(s: str) -> str:
-    if not s:
-        return ""
-    s = s.replace("\u00A0", " ")
-    s = s.replace("\n", " ").replace("\r", " ")
-    return s.strip()
-
-def _first_non_empty_line(text: str) -> str:
-    """
-    Возвращает первую непустую строку текста.
-    """
-    for ln in (text or '').splitlines():
-        if ln.strip():
-            return ln.strip()
-    return ''
-
-
-def _remove_first_line(text: str) -> str:
-    """
-    Возвращает текст без первой непустой строки (используется, чтобы
-    убрать заголовок раздела из текста и не дублировать его в таблице).
-    """
-    if not text:
-        return ""
-    lines = text.splitlines()
-    found = False
-    new_lines: List[str] = []
-    for ln in lines:
-        if not found and ln.strip():
-            found = True
-            continue
-        new_lines.append(ln)
-    return "\n".join(new_lines).lstrip()
-
 
 def _write_fragments(paragraph, frags: List[Tuple[str, str, Tuple[int, int, int]]], default_size_pt: int = 12) -> None:
     """

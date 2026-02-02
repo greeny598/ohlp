@@ -8,7 +8,6 @@ from typing import Optional, Literal
 
 from utils.docling_singletons import get_docx_converter, get_pdf_converter
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Два типа документов: leaflet и ohlp

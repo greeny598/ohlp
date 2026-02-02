@@ -150,30 +150,6 @@ async def extract_sections(rec_text: str) -> List[str]:
     return await asyncio.to_thread(extract_sections_from_recommendations, rec_text)
 
 
-async def split_into_sections(
-    *,
-    doc_type: str,
-    test_text: str,
-    ref_text: str,
-    rec_text: str,
-    sections: List[str],
-) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
-    """Split test/ref/rec texts into section blocks concurrently."""
-    logger.info("Разбиение текстов по разделам…")
-    if doc_type == "leaflet":
-        test_blocks, ref_blocks = await asyncio.gather(
-            asyncio.to_thread(split_leaflet_sections_simple, test_text, sections),
-            asyncio.to_thread(split_leaflet_sections_simple, ref_text, sections),
-        )
-    else:
-        test_blocks, ref_blocks = await asyncio.gather(
-            asyncio.to_thread(split_ohlp_sections, test_text, sections),
-            asyncio.to_thread(split_ohlp_sections, ref_text, sections),
-        )
-    recs_blocks = await asyncio.to_thread(split_recommendations, rec_text, sections)
-    return test_blocks, ref_blocks, recs_blocks
-
-
 async def check_recommendations(
     *,
     checker: SectionChecker,
