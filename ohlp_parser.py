@@ -59,6 +59,35 @@ def _collapse_wrapped_headings(text: str, sections: Optional[List[str]]) -> str:
     return text
 
 
+def _ensure_heading_linebreaks(text: str, sections: Optional[List[str]]) -> str:
+    """
+    Гарантирует перенос строки перед известными заголовками из `sections`,
+    если они оказались склеены с предыдущей строкой при PDF-конвертации.
+    """
+    if not sections:
+        return text
+
+    for sec in sections:
+        if not sec:
+            continue
+
+        norm = " ".join(sec.split())
+        if not norm:
+            continue
+
+        tokens = norm.split(" ")
+        pattern = r"(?m)(?<!\d)" + r"\s+".join(re.escape(tok) for tok in tokens)
+
+        def repl(m: re.Match) -> str:
+            start = m.start()
+            prefix = "" if start == 0 or text[start - 1] == "\n" else "\n"
+            return prefix + re.sub(r"\s+", " ", m.group(0)).strip()
+
+        text = re.sub(pattern, repl, text)
+
+    return text
+
+
 def _collect_candidates(text: str) -> List[Tuple[int, int, str, str, str]]:
     out: List[Tuple[int, int, str, str, str]] = []
     for m in HEADING_RE.finditer(text):
@@ -87,6 +116,7 @@ def split_ohlp_sections(
     """
     raw = _normalize_text(text)
     raw = _collapse_wrapped_headings(raw, sections)
+    raw = _ensure_heading_linebreaks(raw, sections)
 
     cands = _collect_candidates(raw)
     result: Dict[str, str] = {}
