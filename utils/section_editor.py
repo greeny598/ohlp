@@ -1,4 +1,4 @@
-import re
+0ю re
 from typing import List, Dict, Any, Tuple
 
 import gradio as gr
@@ -19,7 +19,7 @@ def extract_markdown_and_lines(file) -> Tuple[str, List[str]]:
 
 
 # =========================
-# Авто-границы
+# Авто-границы0ю
 # =========================
 _RELAXED_RE = re.compile(r"^\s*(?P<num>\d+(?:\.\d+)*)\.?\s+(?P<title>\S.*)$")
 
@@ -179,6 +179,7 @@ def build_section_editor(
     with gr.Group() as root:
         gr.HTML("""
             <style>
+
             #btn-split button,
             #btn-split {
                 border: 1px solid #000 !important;
@@ -190,6 +191,49 @@ def build_section_editor(
                 border: 1px solid #000 !important;
                 border-radius: 6px !important;
             }
+
+            /* -------- фиксированные ширины колонок таблиц -------- */
+
+            /* Левая таблица: № | Текст = 0.05 / 0.95 */
+            #lines-table table {
+                table-layout: fixed !important;
+                width: 100% !important;
+            }
+
+            #lines-table table th:nth-child(1),
+            #lines-table table td:nth-child(1) {
+                width: 5% !important;
+                min-width: 5% !important;
+                max-width: 5% !important;
+            }
+
+            #lines-table table th:nth-child(2),
+            #lines-table table td:nth-child(2) {
+                width: 95% !important;
+                min-width: 95% !important;
+                max-width: 95% !important;
+            }
+
+            /* Правая таблица: Заголовок | Превью = 0.2 / 0.8 */
+            #sections-table table {
+                table-layout: fixed !important;
+                width: 100% !important;
+            }
+
+            #sections-table table th:nth-child(1),
+            #sections-table table td:nth-child(1) {
+                width: 20% !important;
+                min-width: 20% !important;
+                max-width: 20% !important;
+            }
+
+            #sections-table table th:nth-child(2),
+            #sections-table table td:nth-child(2) {
+                width: 80% !important;
+                min-width: 80% !important;
+                max-width: 80% !important;
+            }
+
             </style>
             """)
 
@@ -205,6 +249,7 @@ def build_section_editor(
         predicted_state = gr.State([])
         manual_state = gr.State([])
         sections_state = gr.State([])
+        window_start_state = gr.State(0)
 
         approved_state = gr.State(False)
         final_blocks_state = gr.State({})
@@ -215,7 +260,7 @@ def build_section_editor(
 
         # --------- Controls ----------
         with gr.Row(elem_classes=["section-editor-controls"]):
-            # preview_lines = gr.Slider(...)   # 🔕 временно отключено (закомментировано, не удалено)
+            # preview_lines = gr.Slider(...)   # временно отключено
 
             split_btn = gr.Button(
                 "Пересобрать",
@@ -241,6 +286,7 @@ def build_section_editor(
                     interactive=False,
                     wrap=True,
                     max_height=TABLE_HEIGHT,
+                    elem_id="lines-table",
                 )
             with gr.Column(scale=1):
                 sections_table = gr.Dataframe(
@@ -249,6 +295,7 @@ def build_section_editor(
                     interactive=False,
                     wrap=True,
                     max_height=TABLE_HEIGHT,
+                    elem_id="sections-table",
                 )
 
         if show_file_input:

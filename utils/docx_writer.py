@@ -8,6 +8,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 from docx.shared import Cm, Pt
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from rapidfuzz import fuzz
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.text import WD_COLOR_INDEX
@@ -273,7 +274,53 @@ def _write_fragments(paragraph, frags: List[Tuple[str, str, Tuple[int, int, int]
             run.font.color.rgb = RGBColor(r, g, b)
             
             
+def _set_cell_width(cell, width_cm: float) -> None:
+    cell.width = Cm(width_cm)
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
 
+    tcW = tcPr.find(qn("w:tcW"))
+    if tcW is None:
+        tcW = OxmlElement("w:tcW")
+        tcPr.append(tcW)
+
+    tcW.set(qn("w:type"), "dxa")
+    # 1 cm = 567 twips
+    tcW.set(qn("w:w"), str(int(width_cm * 567)))
+
+
+def _fix_two_column_table_layout(table, total_width_cm: float = 20.0) -> None:
+    """
+    Жёстко фиксирует 2 колонки по 50% / 50%.
+    """
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+
+    left_w = total_width_cm / 2
+    right_w = total_width_cm / 2
+
+    tbl = table._tbl
+    tblPr = tbl.tblPr
+
+    tblW = tblPr.find(qn("w:tblW"))
+    if tblW is None:
+        tblW = OxmlElement("w:tblW")
+        tblPr.append(tblW)
+    tblW.set(qn("w:type"), "dxa")
+    tblW.set(qn("w:w"), str(int(total_width_cm * 567)))
+
+    tblLayout = tblPr.find(qn("w:tblLayout"))
+    if tblLayout is None:
+        tblLayout = OxmlElement("w:tblLayout")
+        tblPr.append(tblLayout)
+    tblLayout.set(qn("w:type"), "fixed")
+
+    for row in table.rows:
+        if len(row.cells) >= 2:
+            _set_cell_width(row.cells[0], left_w)
+            _set_cell_width(row.cells[1], right_w)
+            row.cells[0].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+            row.cells[1].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
 
 
 # =========================
@@ -370,7 +417,7 @@ def _parse_md_table_lines(table_lines: List[str]) -> List[List[str]]:
 
 
 def _clear_cell(cell) -> None:
-    """Аккуратно очищает ячейку от текста (таблицы python-docx в ячейке удалять сложно,
+    """очищает ячейку от текста (таблицы python-docx в ячейке удалять сложно,
     но для нашего сценария мы создаём новую строку и пишем с нуля).
     """
     cell.text = ""
@@ -610,6 +657,8 @@ def fill_comparison_table(doc: Document,
     """
 
     table = doc.tables[table_index]
+    
+    _fix_two_column_table_layout(table, total_width_cm=25.0)
 
     # -----------------------------------------
     # 0. Очистка таблицы: оставляем только шапку
@@ -712,7 +761,7 @@ def fill_comparison_table(doc: Document,
             run.bold = True
             run.font.size = Pt(12)
 
-        # 🔴 если отличается от эталона или отсутствует
+        # если отличается от эталона или отсутствует
         if _norm_header_simple(ref_header) != _norm_header_simple(sec):
             set_cell_shading(cell_ref, "FF9999")
 
@@ -730,7 +779,7 @@ def fill_comparison_table(doc: Document,
                 run.bold = True
                 run.font.size = Pt(12)
 
-            # 🔴 если отличается от эталона или отсутствует
+            # если отличается от эталона или отсутствует
             if _norm_header_simple(test_header) != _norm_header_simple(sec):
                 set_cell_shading(cell_test, "FF9999")
 
@@ -820,6 +869,8 @@ def fill_comparison_table(doc: Document,
             ref_frags_extra, test_frags_extra = highlight_differences(ref_text, test_text)
             _write_fragments(p_ref_b, ref_frags_extra)
             _write_fragments(p_test_b, test_frags_extra)
+            
+    _fix_two_column_table_layout(table, total_width_cm=25.0)
 
 def save_with_timestamp(doc: Document,
                         filetype: str,

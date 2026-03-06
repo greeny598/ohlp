@@ -5,7 +5,7 @@ __all__ = ["split_ohlp_sections"]
 
 # Строгий заголовок ОХЛП: 1. ..., 4.1. ..., 6.2.3. ...
 HEADING_RE = re.compile(
-    r"(?m)^(?P<header>\s*(?P<num>\d+(?:\.\d+)*)\.\s+(?P<title>[^\n\r]+))\s*$"
+    r"(?m)^(?P<header>\s*(?P<num>[1-9](?:\.\d+)*)\.\s+(?P<title>[A-Za-zА-Яа-яЁё][^\n\r]*))\s*$"
 )
 
 WS_RE = re.compile(r"[\t\u00A0\u2007\u202F]+")
